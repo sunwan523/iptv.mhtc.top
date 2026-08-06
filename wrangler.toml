@@ -1,0 +1,16 @@
+name = "iptv"
+main = "worker.js"
+compatibility_date = "2026-04-08"
+
+[[kv_namespaces]]
+binding = "SOURCES_KV"
+id = "a38a02d5da494652981f3ac86d9f3ead"
+preview_id = "a38a02d5da494652981f3ac86d9f3ead"
+
+[[kv_namespaces]]
+binding = "PLAYLISTS_KV"
+id = "1e411bc68d4b48449c9290d8fd61c642"
+preview_id = "1e411bc68d4b48449c9290d8fd61c642"
+
+[triggers]
+crons = ["0 1 * * *", "0 13 * * *"]
