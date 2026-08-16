@@ -1,0 +1,24 @@
+{
+  "port": 8787,
+  "checkIntervalSeconds": 300,
+  "timeoutMs": 15000,
+  "concurrency": 6,
+  "openBrowserOnStart": true,
+  "enableNotifications": false,
+  "alertOnAllFailures": false,
+  "reAlertMinutes": 30,
+  "playlistUrls": [
+    "https://iptv.mhtc.top/iptv2026.m3u",
+    "https://iptv.mhtc.top/playlist/1.m3u"
+  ],
+  "selfBuiltHosts": [
+    "192.168.100.1",
+    "iptv.mhtc.top",
+    "p.mhtc.top"
+  ],
+  "baseEndpoints": [
+    "http://192.168.100.1:4000",
+    "http://192.168.100.1:3000",
+    "https://iptv.mhtc.top"
+  ]
+}

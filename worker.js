@@ -3,6 +3,7 @@ const CONFIG = {
     VERSION: '20260807-v9',
     GROUP_NAME: '梦回唐朝',
     ADMIN_PASSWORD: '523626',
+    PROTECTED_PLAYLISTS: ['1'],
     FETCH_TIMEOUT_MS: 15000,
     MAX_SOURCE_BYTES: 2 * 1024 * 1024,
     URL_REPLACEMENTS: [
@@ -466,6 +467,21 @@ async function deletePlaylist(id) {
     }
 }
 
+// 固定播放列表：长期保留，不允许删除或修改
+function isProtectedPlaylist(id, pl) {
+    const protectedIds = Array.isArray(CONFIG.PROTECTED_PLAYLISTS) ? CONFIG.PROTECTED_PLAYLISTS : [];
+    if (protectedIds.includes(id)) return true;
+    const name = pl && pl.name;
+    return name ? protectedIds.includes(name) : false;
+}
+
+function playlistProtectedError() {
+    return new Response(JSON.stringify({ success: false, error: '固定播放列表不允许删除' }, null, 2), {
+        status: 403,
+        headers: { 'Content-Type': 'application/json; charset=utf-8' }
+    });
+}
+
 async function generatePlaylistId(name) {
     const base = (name || '').replace(/[^a-zA-Z0-9\u4e00-\u9fa5_-]/g, '_') || 'playlist';
     const cleanBase = base.replace(/_+/g, '_').replace(/^_|_$/g, '');
@@ -474,6 +490,53 @@ async function generatePlaylistId(name) {
     let counter = 1;
     while (await getPlaylist(cleanBase + '_' + counter)) counter++;
     return cleanBase + '_' + counter;
+}
+
+// 重新匹配播放列表频道（数据源刷新后调用）
+async function rematchPlaylist(plId, pl) {
+    const oldUrls = new Set(pl.urls || []);
+    const channelKeys = new Set();
+    for (const url of oldUrls) {
+        const ch = cacheData.channels.find(c => c.url === url);
+        if (ch) {
+            channelKeys.add(getChannelKey(ch.name));
+        }
+    }
+    if (channelKeys.size === 0 && oldUrls.size > 0) {
+        for (const url of oldUrls) {
+            channelKeys.add(url);
+        }
+    }
+    const newUrls = new Set();
+    for (const ch of cacheData.channels) {
+        if (channelKeys.has(getChannelKey(ch.name)) || channelKeys.has(ch.url)) {
+            newUrls.add(ch.url);
+        }
+    }
+    pl.urls = Array.from(newUrls);
+    pl.channelCount = pl.urls.length;
+    pl.updatedAt = new Date().toISOString();
+    await savePlaylist(plId, pl);
+    return {
+        oldCount: oldUrls.size,
+        newCount: pl.channelCount,
+        addedCount: pl.channelCount - oldUrls.size
+    };
+}
+
+// 刷新所有播放列表
+async function refreshAllPlaylists() {
+    const playlists = await getPlaylists();
+    const results = [];
+    for (const [id, pl] of Object.entries(playlists)) {
+        try {
+            const r = await rematchPlaylist(id, pl);
+            results.push({ id, name: pl.name, protected: isProtectedPlaylist(id, pl), oldCount: r.oldCount, newCount: r.newCount, addedCount: r.addedCount });
+        } catch (err) {
+            results.push({ id, name: pl.name, protected: isProtectedPlaylist(id, pl), error: err.message || String(err) });
+        }
+    }
+    return results;
 }
 
 // ===== 数据源抓取 =====
@@ -975,6 +1038,7 @@ async function handleRequest(request) {
         const list = Object.keys(playlists).map(id => ({
             id: id,
             name: playlists[id].name,
+            protected: isProtectedPlaylist(id, playlists[id]),
             channelCount: playlists[id].channelCount,
             url: `/playlist/${id}.m3u`,
             createdAt: playlists[id].createdAt,
@@ -1123,6 +1187,9 @@ async function handleRequest(request) {
                 headers: { 'Content-Type': 'application/json; charset=utf-8' }
             });
         }
+        if (isProtectedPlaylist(plId, pl)) {
+            return playlistProtectedError();
+        }
         await deletePlaylist(plId);
         return new Response(JSON.stringify({ success: true }, null, 2), {
             headers: { 'Content-Type': 'application/json; charset=utf-8' }
@@ -1142,35 +1209,13 @@ async function handleRequest(request) {
         }
         try {
             await refreshAllSources();
-            const oldUrls = new Set(pl.urls || []);
-            const channelKeys = new Set();
-            for (const url of oldUrls) {
-                const ch = cacheData.channels.find(c => c.url === url);
-                if (ch) {
-                    channelKeys.add(getChannelKey(ch.name));
-                }
-            }
-            if (channelKeys.size === 0 && oldUrls.size > 0) {
-                for (const url of oldUrls) {
-                    channelKeys.add(url);
-                }
-            }
-            const newUrls = new Set();
-            for (const ch of cacheData.channels) {
-                if (channelKeys.has(getChannelKey(ch.name)) || channelKeys.has(ch.url)) {
-                    newUrls.add(ch.url);
-                }
-            }
-            pl.urls = Array.from(newUrls);
-            pl.channelCount = pl.urls.length;
-            pl.updatedAt = new Date().toISOString();
-            await savePlaylist(plId, pl);
+            const r = await rematchPlaylist(plId, pl);
             return new Response(JSON.stringify({
                 success: true,
                 message: '播放列表已更新',
-                oldChannelCount: oldUrls.size,
-                newChannelCount: pl.channelCount,
-                addedCount: pl.channelCount - oldUrls.size,
+                oldChannelCount: r.oldCount,
+                newChannelCount: r.newCount,
+                addedCount: r.addedCount,
                 url: `/playlist/${plId}.m3u`,
                 lastUpdated: pl.updatedAt
             }, null, 2), {
@@ -1507,6 +1552,7 @@ const FRONTEND_HTML = `
         .channel-info { flex: 1; display: flex; flex-direction: column; align-items: flex-start; }
         .channel-name { font-weight: 500; color: #1f2937; text-align: left; }
         .source-badge { display: inline-block; font-size: 10px; background: #3b82f6; color: white; padding: 1px 6px; border-radius: 8px; margin-left: 6px; vertical-align: middle; }
+        .fixed-badge { display: inline-block; font-size: 10px; background: #92400e; color: #fef3c7; padding: 2px 8px; border-radius: 8px; margin-left: 6px; vertical-align: middle; }
         .channel-group { font-size: 12px; color: #6b7280; }
         .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; justify-content: center; align-items: center; z-index: 1000; }
         .modal { background: white; border-radius: 8px; padding: 24px; width: 90%; max-width: 900px; max-height: 90vh; overflow-y: auto; }
@@ -2158,15 +2204,19 @@ const FRONTEND_HTML = `
             }
             table.innerHTML = data.playlists.map(pl => \`
                 <tr>
-                    <td>\${escapeHtml(pl.name)}</td>
+                    <td>\${escapeHtml(pl.name)}\${pl.protected ? '<span class="fixed-badge">固定</span>' : ''}</td>
                     <td>\${pl.channelCount}</td>
                     <td>\${new Date(pl.createdAt).toLocaleString()}</td>
                     <td>\${pl.updatedAt ? new Date(pl.updatedAt).toLocaleString() : '-'}</td>
                     <td><a href="\${escapeHtml(pl.url)}" target="_blank">\${escapeHtml(pl.url)}</a></td>
                     <td class="actions">
-                        <button class="btn btn-primary" onclick="refreshPlaylist('\${jsArg(pl.id)}', '\${jsArg(pl.name)}')">更新</button>
-                        <button class="btn btn-secondary" onclick="editPlaylist('\${jsArg(pl.id)}')">编辑频道</button>
-                        <button class="btn btn-danger" onclick="deletePlaylist('\${jsArg(pl.id)}')">删除</button>
+                        \${pl.protected
+                            ? '<button class="btn btn-primary" onclick="refreshPlaylist(' + jsArg(pl.id) + ', ' + jsArg(pl.name) + ')">更新</button>' +
+                              '<button class="btn btn-secondary" onclick="editPlaylist(' + jsArg(pl.id) + ')">编辑频道</button>' +
+                              '<span class="fixed-badge" title="固定播放列表，不可删除">不可删除</span>'
+                            : '<button class="btn btn-primary" onclick="refreshPlaylist(' + jsArg(pl.id) + ', ' + jsArg(pl.name) + ')">更新</button>' +
+                              '<button class="btn btn-secondary" onclick="editPlaylist(' + jsArg(pl.id) + ')">编辑频道</button>' +
+                              '<button class="btn btn-danger" onclick="deletePlaylist(' + jsArg(pl.id) + ')">删除</button>'}
                     </td>
                 </tr>
             \`).join('');
@@ -2539,7 +2589,13 @@ addEventListener('fetch', event => {
 });
 
 addEventListener('scheduled', event => {
-    event.waitUntil(refreshAllSources().catch(err => {
-        console.error('定时刷新失败:', err.message || err);
-    }));
+    event.waitUntil((async () => {
+        try {
+            await refreshAllSources();
+            const playlistResults = await refreshAllPlaylists();
+            console.log('定时刷新完成:', JSON.stringify({ sources: 'ok', playlists: playlistResults }));
+        } catch (err) {
+            console.error('定时刷新失败:', err.message || err);
+        }
+    })());
 });

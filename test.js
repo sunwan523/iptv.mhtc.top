@@ -25,6 +25,10 @@ this.__testExports = {
   getChannelKey,
   mergeChannels,
   isSafeSourceUrl,
+  isProtectedPlaylist,
+  rematchPlaylist,
+  refreshAllPlaylists,
+  setCacheChannels(channels) { cacheData.channels = channels; },
   escapeM3UAttr,
   escapeM3UName,
   replaceUrl
@@ -65,7 +69,47 @@ assert.strictEqual(t.isSafeSourceUrl('http://localhost/a.m3u'), false);
 assert.strictEqual(t.isSafeSourceUrl('http://[::1]/a.m3u'), false);
 assert.strictEqual(t.isSafeSourceUrl('file:///etc/passwd'), false);
 
+assert.strictEqual(t.isProtectedPlaylist('1', { name: '1' }), true);
+assert.strictEqual(t.isProtectedPlaylist('1', { name: '播放列表' }), true);
+assert.strictEqual(t.isProtectedPlaylist('2', { name: '1' }), true);
+assert.strictEqual(t.isProtectedPlaylist('2', { name: '2' }), false);
+assert.strictEqual(t.isProtectedPlaylist('', { name: '2' }), false);
+
 assert.strictEqual(t.escapeM3UName('a,b\nc'), 'a\uFF0Cb c');
 assert.strictEqual(t.escapeM3UAttr('a"b\r\nc'), 'abc');
 
-console.log('All tests passed');
+(async () => {
+    const kv = new Map();
+    sandbox.PLAYLISTS_KV = {
+        list: async () => ({ keys: Array.from(kv.keys()).map(name => ({ name })) }),
+        get: async key => (kv.has(key) ? kv.get(key) : null),
+        put: async (key, value) => kv.set(key, value),
+        delete: async key => kv.delete(key)
+    };
+    t.setCacheChannels([
+        { name: 'CCTV-1', url: 'https://a.example.com/cctv1.m3u8' },
+        { name: 'CCTV-1', url: 'https://b.example.com/cctv1.m3u8' },
+        { name: 'CCTV-5', url: 'https://a.example.com/cctv5.m3u8' }
+    ]);
+
+    kv.set('1', JSON.stringify({ name: '1', urls: ['https://a.example.com/cctv1.m3u8'], channelCount: 1 }));
+    kv.set('2', JSON.stringify({ name: '测试', urls: ['https://a.example.com/cctv1.m3u8'], channelCount: 1 }));
+
+    const result = await t.rematchPlaylist('2', JSON.parse(kv.get('2')));
+    assert.strictEqual(result.oldCount, 1);
+    assert.strictEqual(result.newCount, 2);
+    assert.strictEqual(result.addedCount, 1);
+
+    const results = await t.refreshAllPlaylists();
+    const refreshed = results.find(r => r.id === '2');
+    const refreshedFixed = results.find(r => r.id === '1');
+    assert.strictEqual(refreshed.newCount, 2);
+    assert.strictEqual(refreshedFixed.newCount, 2);
+    assert.strictEqual(refreshedFixed.protected, true);
+    assert.strictEqual(JSON.parse(kv.get('1')).urls.length, 2);
+})()
+    .then(() => console.log('All tests passed'))
+    .catch(err => {
+        console.error(err);
+        process.exitCode = 1;
+    });

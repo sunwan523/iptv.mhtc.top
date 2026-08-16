@@ -33,10 +33,43 @@
 - 创建自定义播放列表
 - 可视化编辑频道顺序
 - 支持导入/导出
+- 播放列表 `1` 为固定长期保留项：禁止删除，但内容可正常编辑和刷新
 
 ### 6. 后台管理
 - 管理后台接口需要请求头 `X-Admin-Password`
 - 密码在 `worker.js` 的 `CONFIG.ADMIN_PASSWORD` 中配置
+
+## 本地频道检测器
+
+`local-checker/` 是一个零依赖的本地检测器，运行在 Windows + Node.js 18+ 环境。
+
+- 定时拉取播放列表并逐个探测频道：跟随 302 跳转，校验 M3U8 内容，检查响应状态
+- 重点监控自建源：`192.168.100.1:4000`、`192.168.100.1:3000`、`iptv.mhtc.top`
+- 检测到故障时弹出 Windows 桌面提醒并播放提示音，写入 `alerts.log`
+- 默认只提醒自建源故障；可在页面设置中开启外网频道故障提醒
+- 内置网页看板：自建服务状态、频道状态、检测历史、提醒记录、设置
+
+### 使用
+
+1. 按需修改 `local-checker/config.json`（默认已配置 `iptv2026.m3u` 和固定播放列表 `1`）
+2. 启动：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File local-checker/start.ps1
+```
+
+3. 打开 `http://127.0.0.1:8787`
+4. 停止：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File local-checker/stop.ps1
+```
+
+也可执行一次性检测（适合放入 Windows 任务计划程序）：
+
+```powershell
+node local-checker/server.js --check-once
+```
 
 ## API 接口
 
@@ -67,7 +100,7 @@
 3. 在 Workers 设置中配置自定义域名（可选）
 4. 访问 Worker URL 或绑定的域名即可使用
 
-定时任务已配置：每天 01:00 和 13:00 自动刷新一次数据源。
+定时任务已配置：每天北京时间 05:00 和 17:00 自动刷新数据源和所有播放列表。
 
 ### 本地开发
 ```bash
@@ -95,11 +128,13 @@ wrangler dev
 ```
 iptv.mhtc.top/
 ├── worker.js      # 主 Worker 脚本（包含所有逻辑和前端页面）
+├── local-checker/ # 本地播放源检测器（Web 看板 + 桌面提醒）
 └── README.md      # 本项目说明文件
 ```
 
 ## 版本历史
 
+- **20260816-local**：新增本地频道检测器；播放列表 `1` 设为固定项，禁止删除和修改
 - **20260807-v9**：当前版本
   - 后台接口增加管理密码鉴权
   - 修复前端 HTML 注入风险

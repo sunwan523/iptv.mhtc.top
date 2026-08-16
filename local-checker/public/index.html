@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>IPTV 播放源检测器</title>
+    <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+    <header class="topbar">
+        <div class="brand">
+            <h1>IPTV 播放源检测器</h1>
+            <p class="muted">本地运行 · 自动检查播放列表与自建源</p>
+        </div>
+        <div class="top-actions">
+            <span id="autoBadge" class="badge">自动检测中</span>
+            <button id="toggleBtn" class="btn" type="button">暂停检测</button>
+            <button id="checkNowBtn" class="btn primary" type="button">立即检测</button>
+            <button id="shutdownBtn" class="btn danger" type="button">关闭检测</button>
+        </div>
+    </header>
+
+    <main class="page">
+        <section class="stat-strip" aria-label="检测概况">
+            <div class="stat">
+                <span class="stat-label">最近检测</span>
+                <strong id="lastCheckAt">-</strong>
+                <small id="lastCheckMeta" class="muted">-</small>
+            </div>
+            <div class="stat">
+                <span class="stat-label">频道总数</span>
+                <strong id="channelTotal">0</strong>
+                <small id="channelMeta" class="muted">-</small>
+            </div>
+            <div class="stat">
+                <span class="stat-label">自建故障</span>
+                <strong id="selfFailures">0</strong>
+                <small id="baseFailureMeta" class="muted">-</small>
+            </div>
+            <div class="stat">
+                <span class="stat-label">下次检测</span>
+                <strong id="nextCheckAt">-</strong>
+                <small id="runState" class="muted">-</small>
+            </div>
+        </section>
+
+        <section class="panel">
+            <div class="panel-head">
+                <h2>自建服务</h2>
+                <span id="baseSummary" class="muted">-</span>
+            </div>
+            <div id="baseList" class="endpoint-list"></div>
+        </section>
+
+        <section class="panel">
+            <div class="panel-head">
+                <h2>频道状态</h2>
+                <div class="filters">
+                    <select id="filterType" aria-label="来源筛选">
+                        <option value="all">全部来源</option>
+                        <option value="self">自建源</option>
+                        <option value="external">外网源</option>
+                    </select>
+                    <select id="filterStatus" aria-label="状态筛选">
+                        <option value="all">全部状态</option>
+                        <option value="fail">仅故障</option>
+                        <option value="ok">正常</option>
+                    </select>
+                    <input id="searchInput" type="search" placeholder="搜索频道名称">
+                </div>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>频道</th>
+                            <th>类型</th>
+                            <th>状态</th>
+                            <th>状态码</th>
+                            <th>耗时</th>
+                            <th>最近正常</th>
+                            <th>故障详情</th>
+                        </tr>
+                    </thead>
+                    <tbody id="channelBody"></tbody>
+                </table>
+            </div>
+            <p id="tableEmpty" class="muted empty">暂无频道数据</p>
+        </section>
+
+        <section class="split">
+            <div class="panel">
+                <div class="panel-head">
+                    <h2>最近检测</h2>
+                </div>
+                <div id="historyList" class="mini-list"></div>
+            </div>
+            <div class="panel">
+                <div class="panel-head">
+                    <h2>提醒记录</h2>
+                </div>
+                <div id="alertList" class="mini-list"></div>
+            </div>
+        </section>
+
+        <section class="panel">
+            <div class="panel-head">
+                <h2>设置</h2>
+            </div>
+            <form id="settingsForm" class="settings-form">
+                <label>
+                    检测间隔（秒）
+                    <input id="intervalInput" type="number" min="30" max="86400" required>
+                </label>
+                <label>
+                    重复提醒（分钟）
+                    <input id="reAlertInput" type="number" min="1" max="1440" required>
+                </label>
+                <label class="check">
+                    <input id="alertAllInput" type="checkbox">
+                    外网频道故障也提醒
+                </label>
+                <label class="check">
+                    <input id="notifyInput" type="checkbox">
+                    桌面提醒
+                </label>
+                <button class="btn primary" type="submit">保存设置</button>
+                <span id="settingsStatus" class="muted"></span>
+            </form>
+        </section>
+    </main>
+
+    <script src="/app.js"></script>
+</body>
+</html>
