@@ -1,0 +1,9 @@
+{
+  "id": "_fixed_mapping",
+  "name": "固定映射",
+  "url": "https://iptv.mhtc.top/iptv2026.m3u",
+  "enabled": true,
+  "priority": 3,
+  "createdAt": "2026-08-30T06:14:36.399Z",
+  "updatedAt": "2026-08-30T06:14:36.399Z"
+}
