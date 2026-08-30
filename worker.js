@@ -2,7 +2,6 @@
 const CONFIG = {
     VERSION: '20260807-v9',
     GROUP_NAME: '梦回唐朝',
-    ADMIN_PASSWORD: '523626',
     PROTECTED_PLAYLISTS: ['1'],
     FETCH_TIMEOUT_MS: 15000,
     MAX_SOURCE_BYTES: 2 * 1024 * 1024,
@@ -11,19 +10,6 @@ const CONFIG = {
     ],
     DEFAULT_SOURCES: []
 };
-
-const ADMIN_HEADER = 'x-admin-password';
-
-function isAuthorized(request) {
-    return request.headers.get(ADMIN_HEADER) === CONFIG.ADMIN_PASSWORD;
-}
-
-function adminUnauthorized() {
-    return new Response(JSON.stringify({ success: false, error: '需要管理密码' }, null, 2), {
-        status: 401,
-        headers: { 'Content-Type': 'application/json; charset=utf-8' }
-    });
-}
 
 // 内存缓存（初始化时包含示例数据）
 let cacheData = {
@@ -482,6 +468,16 @@ function playlistProtectedError() {
     });
 }
 
+// 使指定播放列表的 M3U 缓存失效（与 /playlist/{id}.m3u 的 Cache API 配套使用）
+// origin 用当前请求的 origin，保证与缓存时使用的 Cache Key（scheme + hostname + pathname）一致
+async function invalidatePlaylistCache(origin, plId) {
+    try {
+        await caches.default.delete(new Request(origin + '/playlist/' + plId + '.m3u'));
+    } catch (err) {
+        console.warn('invalidate playlist cache failed:', err.message || err);
+    }
+}
+
 async function generatePlaylistId(name) {
     const base = (name || '').replace(/[^a-zA-Z0-9\u4e00-\u9fa5_-]/g, '_') || 'playlist';
     const cleanBase = base.replace(/_+/g, '_').replace(/^_|_$/g, '');
@@ -733,18 +729,6 @@ async function genFixedM3U(baseUrl) {
     return m3u;
 }
 
-const ADMIN_PATH_PATTERNS = [
-    /^\/api\/status$/,
-    /^\/api\/sources$/,
-    /^\/api\/source(\/|$)/,
-    /^\/api\/refresh$/,
-    /^\/api\/merged-channels$/,
-    /^\/api\/playlists$/,
-    /^\/api\/playlist(\/|$)/,
-    /^\/api\/channel-mapping(\/|$)/,
-    /^\/api\/clear-cache$/
-];
-
 // ===== 请求处理 =====
 async function handleRequest(request) {
     const url = new URL(request.url);
@@ -761,10 +745,6 @@ async function handleRequest(request) {
                 'Access-Control-Allow-Headers': 'Content-Type, X-Admin-Password'
             }
         });
-    }
-
-    if (ADMIN_PATH_PATTERNS.some(re => re.test(path)) && !isAuthorized(request)) {
-        return adminUnauthorized();
     }
 
     // 如果缓存为空或是示例数据，自动刷新数据
@@ -1118,6 +1098,7 @@ async function handleRequest(request) {
                 updatedAt: now
             };
             await savePlaylist(id, playlist);
+            await invalidatePlaylistCache(url.origin, id);
 
             return new Response(JSON.stringify({
                 success: true,
@@ -1166,6 +1147,7 @@ async function handleRequest(request) {
         }
         pl.updatedAt = new Date().toISOString();
         await savePlaylist(plId, pl);
+        await invalidatePlaylistCache(url.origin, plId);
         return new Response(JSON.stringify({
             success: true,
             id: plId,
@@ -1191,6 +1173,7 @@ async function handleRequest(request) {
             return playlistProtectedError();
         }
         await deletePlaylist(plId);
+        await invalidatePlaylistCache(url.origin, plId);
         return new Response(JSON.stringify({ success: true }, null, 2), {
             headers: { 'Content-Type': 'application/json; charset=utf-8' }
         });
@@ -1210,6 +1193,7 @@ async function handleRequest(request) {
         try {
             await refreshAllSources();
             const r = await rematchPlaylist(plId, pl);
+            await invalidatePlaylistCache(url.origin, plId);
             return new Response(JSON.stringify({
                 success: true,
                 message: '播放列表已更新',
@@ -1446,9 +1430,25 @@ async function handleRequest(request) {
             'Content-Type': 'application/vnd.apple.mpegurl',
             'Access-Control-Allow-Origin': '*',
             'Access-Control-Allow-Methods': 'GET, OPTIONS',
-            'Access-Control-Allow-Headers': 'Content-Type'
+            'Access-Control-Allow-Headers': 'Content-Type',
+            'Cache-Control': 'public, max-age=14400'
         };
-        
+
+        // 构造稳定的 Cache Key：scheme + hostname + pathname（忽略 query，避免不同播放列表错误共享缓存）
+        const cacheKey = new Request(url.origin + url.pathname, request);
+
+        // 缓存命中直接返回，不再执行 PLAYLISTS_KV.get(id)
+        const cached = await caches.default.match(cacheKey);
+        if (cached) {
+            const headers = new Headers(cached.headers);
+            headers.set('X-Worker-Cache', 'HIT');
+            return new Response(cached.body, {
+                status: cached.status,
+                statusText: cached.statusText,
+                headers
+            });
+        }
+
         const plId = decodeURIComponent(playlistMatch[1]);
         const pl = await getPlaylist(plId);
         if (!pl) {
@@ -1466,9 +1466,17 @@ async function handleRequest(request) {
             });
         }
 
-        return new Response(await genM3U(channels, url.origin), {
+        const response = new Response(await genM3U(channels, url.origin), {
             headers: m3uHeaders
         });
+
+        // 只缓存 HTTP 200 且确实生成了有效 M3U 内容的成功响应
+        // 先写缓存（写入的副本不含 MISS 标记），再给原始响应标记 MISS
+        if (response.ok) {
+            await caches.default.put(cacheKey, response.clone());
+        }
+        response.headers.set('X-Worker-Cache', 'MISS');
+        return response;
     }
 
     // 302 跳转 - 固定频道 ID 映射到实际播放地址
@@ -1811,7 +1819,6 @@ const FRONTEND_HTML = `
         const pageSize = 50;
 
         const _rawFetch = window.fetch.bind(window);
-        let adminPassword = sessionStorage.getItem('iptv_admin_password') || '';
 
         function escapeHtml(value) {
             return String(value == null ? '' : value)
@@ -1827,25 +1834,7 @@ const FRONTEND_HTML = `
         }
 
         async function adminFetch(path, options) {
-            const opts = options || {};
-            const headers = new Headers(opts.headers || {});
-            if (!adminPassword) {
-                adminPassword = prompt('请输入管理密码') || '';
-                if (adminPassword) sessionStorage.setItem('iptv_admin_password', adminPassword);
-            }
-            if (adminPassword) headers.set('X-Admin-Password', adminPassword);
-            const res = await _rawFetch(path, Object.assign({}, opts, { headers }));
-            if (res.status === 401) {
-                if (!adminPassword) return res;
-                sessionStorage.removeItem('iptv_admin_password');
-                adminPassword = prompt('密码错误，请重新输入') || '';
-                if (adminPassword) {
-                    sessionStorage.setItem('iptv_admin_password', adminPassword);
-                    headers.set('X-Admin-Password', adminPassword);
-                    return _rawFetch(path, Object.assign({}, opts, { headers }));
-                }
-            }
-            return res;
+            return _rawFetch(path, options || {});
         }
         window.fetch = adminFetch;
         
