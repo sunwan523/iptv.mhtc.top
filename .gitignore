@@ -6,3 +6,5 @@ local-checker/state.json
 local-checker/server.pid
 data/
 *.tar
+__pycache__/
+*.pyc
