@@ -887,12 +887,14 @@ async function handleRequest(request) {
                 });
             }
             const id = generateSourceId(body.name);
+            const refreshTimes = Array.isArray(body.refreshTimes) ? body.refreshTimes : ['05:00'];
             const source = {
                 id: id,
                 name: body.name || '新数据源',
                 url: body.url,
                 enabled: body.enabled !== undefined ? body.enabled : true,
                 priority: body.priority !== undefined ? body.priority : 99,
+                refreshTimes: refreshTimes,
                 createdAt: new Date().toISOString()
             };
             await saveSource(id, source);
@@ -931,6 +933,7 @@ async function handleRequest(request) {
         if (body.url) src.url = body.url;
         if (body.enabled !== undefined) src.enabled = body.enabled;
         if (body.priority !== undefined) src.priority = body.priority;
+        if (body.refreshTimes !== undefined) src.refreshTimes = Array.isArray(body.refreshTimes) ? body.refreshTimes : ['05:00'];
         await saveSource(srcId, src);
         return new Response(JSON.stringify({ success: true, source: src }, null, 2), {
             headers: { 'Content-Type': 'application/json; charset=utf-8' }
@@ -1020,6 +1023,7 @@ async function handleRequest(request) {
             name: playlists[id].name,
             protected: isProtectedPlaylist(id, playlists[id]),
             channelCount: playlists[id].channelCount,
+            refreshTimes: playlists[id].refreshTimes || ['05:00'],
             url: `/playlist/${id}.m3u`,
             createdAt: playlists[id].createdAt,
             updatedAt: playlists[id].updatedAt
@@ -1090,10 +1094,12 @@ async function handleRequest(request) {
 
             const id = await generatePlaylistId(body.name);
             const now = new Date().toISOString();
+            const refreshTimes = Array.isArray(body.refreshTimes) ? body.refreshTimes : ['05:00'];
             const playlist = {
                 name: body.name || id,
                 urls: channels.map(ch => ch.url),
                 channelCount: channels.length,
+                refreshTimes: refreshTimes,
                 createdAt: now,
                 updatedAt: now
             };
@@ -1145,6 +1151,7 @@ async function handleRequest(request) {
             pl.urls = pl.urls.filter(url => !body.removeUrls.includes(url));
             pl.channelCount = pl.urls.length;
         }
+        if (body.refreshTimes !== undefined) pl.refreshTimes = Array.isArray(body.refreshTimes) ? body.refreshTimes : ['05:00'];
         pl.updatedAt = new Date().toISOString();
         await savePlaylist(plId, pl);
         await invalidatePlaylistCache(url.origin, plId);
@@ -1611,7 +1618,7 @@ const FRONTEND_HTML = `
                     <div class="panel-title">数据源列表</div>
                     <table class="table">
                         <thead>
-                            <tr><th>名称</th><th>URL</th><th>优先级</th><th>状态</th><th>更新时间</th><th>操作</th></tr>
+                            <tr><th>名称</th><th>URL</th><th>优先级</th><th>刷新时间</th><th>状态</th><th>更新时间</th><th>操作</th></tr>
                         </thead>
                         <tbody id="sourcesTable"></tbody>
                     </table>
@@ -1632,6 +1639,10 @@ const FRONTEND_HTML = `
                         <input type="number" id="sourcePriority" value="99" placeholder="优先级">
                     </div>
                     <div class="form-group">
+                        <label>刷新时间（北京时间 HH:MM，多个用逗号分隔，如 05:00,17:00）</label>
+                        <input type="text" id="sourceRefreshTimes" value="05:00" placeholder="05:00,17:00">
+                    </div>
+                    <div class="form-group">
                         <label class="checkbox-label">
                             <input type="checkbox" id="sourceEnabled" checked> 启用
                         </label>
@@ -1646,7 +1657,7 @@ const FRONTEND_HTML = `
                     <div class="panel-title">播放列表列表</div>
                     <table class="table">
                         <thead>
-                            <tr><th>名称</th><th>频道数</th><th>创建时间</th><th>更新时间</th><th>访问地址</th><th>操作</th></tr>
+                            <tr><th>名称</th><th>频道数</th><th>刷新时间</th><th>创建时间</th><th>更新时间</th><th>访问地址</th><th>操作</th></tr>
                         </thead>
                         <tbody id="playlistsTable"></tbody>
                     </table>
@@ -1661,6 +1672,10 @@ const FRONTEND_HTML = `
                     <div class="form-group">
                         <label>筛选条件（可选）</label>
                         <input type="text" id="playlistSearch" placeholder="搜索关键词">
+                    </div>
+                    <div class="form-group">
+                        <label>刷新时间（北京时间 HH:MM，多个用逗号分隔，如 05:00,17:00）</label>
+                        <input type="text" id="playlistRefreshTimes" value="05:00" placeholder="05:00,17:00">
                     </div>
                     <button class="btn btn-primary" onclick="createPlaylist()">创建播放列表</button>
                 </div>
@@ -1764,6 +1779,10 @@ const FRONTEND_HTML = `
             <div class="form-group">
                 <label>优先级（数字越小越优先）</label>
                 <input type="number" id="editSourcePriority" value="99">
+            </div>
+            <div class="form-group">
+                <label>刷新时间（北京时间 HH:MM，多个用逗号分隔）</label>
+                <input type="text" id="editSourceRefreshTimes" value="05:00" placeholder="05:00,17:00">
             </div>
             <div class="form-group">
                 <label class="checkbox-label">
@@ -2019,9 +2038,12 @@ const FRONTEND_HTML = `
         async function createPlaylist() {
             const name = document.getElementById('playlistName').value;
             const search = document.getElementById('playlistSearch').value;
+            const refreshTimesStr = document.getElementById('playlistRefreshTimes').value;
+            const refreshTimes = refreshTimesStr.split(',').map(s => s.trim()).filter(Boolean);
             
             const body = { name };
             if (search) body.search = search;
+            if (refreshTimes.length > 0) body.refreshTimes = refreshTimes;
             
             const res = await fetch('/api/playlist', {
                 method: 'POST',
@@ -2071,6 +2093,7 @@ const FRONTEND_HTML = `
                     <td>\${escapeHtml(src.name)}</td>
                     <td>\${escapeHtml(src.url || '-')}</td>
                     <td>\${escapeHtml(src.priority || 99)}</td>
+                    <td>\${src.refreshTimes && src.refreshTimes.length > 0 ? src.refreshTimes.join(', ') : '05:00'}</td>
                     <td><span class="badge \${src.enabled ? 'badge-success' : 'badge-danger'}">\${src.enabled ? '启用' : '禁用'}</span></td>
                     <td>\${src.updatedAt ? new Date(src.updatedAt).toLocaleString('zh-CN') : '-'}<br><span style="font-size:10px;color:#9ca3af">\${src.createdAt ? new Date(src.createdAt).toLocaleString('zh-CN') : ''}</span></td>
                     <td class="actions">
@@ -2110,6 +2133,8 @@ const FRONTEND_HTML = `
             const url = document.getElementById('sourceUrl').value;
             const priority = parseInt(document.getElementById('sourcePriority').value) || 99;
             const enabled = document.getElementById('sourceEnabled').checked;
+            const refreshTimesStr = document.getElementById('sourceRefreshTimes').value;
+            const refreshTimes = refreshTimesStr.split(',').map(s => s.trim()).filter(Boolean);
             
             if (!name || !url) {
                 alert('请填写名称和URL');
@@ -2119,7 +2144,7 @@ const FRONTEND_HTML = `
             const res = await fetch('/api/source', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name, url, priority, enabled })
+                body: JSON.stringify({ name, url, priority, enabled, refreshTimes })
             });
             const data = await res.json();
             if (data.success) {
@@ -2127,6 +2152,7 @@ const FRONTEND_HTML = `
                 document.getElementById('sourceName').value = '';
                 document.getElementById('sourceUrl').value = '';
                 document.getElementById('sourcePriority').value = '99';
+                document.getElementById('sourceRefreshTimes').value = '05:00';
                 loadSources();
                 await refreshData();
             } else {
@@ -2141,6 +2167,7 @@ const FRONTEND_HTML = `
             document.getElementById('editSourceName').value = data.name;
             document.getElementById('editSourceUrl').value = data.url;
             document.getElementById('editSourcePriority').value = data.priority || 99;
+            document.getElementById('editSourceRefreshTimes').value = data.refreshTimes && data.refreshTimes.length > 0 ? data.refreshTimes.join(', ') : '05:00';
             document.getElementById('editSourceEnabled').checked = data.enabled;
             document.getElementById('editSourceModal').classList.remove('hidden');
         }
@@ -2155,11 +2182,13 @@ const FRONTEND_HTML = `
             const url = document.getElementById('editSourceUrl').value;
             const priority = parseInt(document.getElementById('editSourcePriority').value) || 99;
             const enabled = document.getElementById('editSourceEnabled').checked;
+            const refreshTimesStr = document.getElementById('editSourceRefreshTimes').value;
+            const refreshTimes = refreshTimesStr.split(',').map(s => s.trim()).filter(Boolean);
             
             const res = await fetch('/api/source/' + id, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name, url, priority, enabled })
+                body: JSON.stringify({ name, url, priority, enabled, refreshTimes })
             });
             const data = await res.json();
             if (data.success) {
@@ -2188,13 +2217,14 @@ const FRONTEND_HTML = `
             const data = await res.json();
             const table = document.getElementById('playlistsTable');
             if (data.playlists.length === 0) {
-                table.innerHTML = '<tr><td colspan="6" class="loading">暂无播放列表</td></tr>';
+                table.innerHTML = '<tr><td colspan="7" class="loading">暂无播放列表</td></tr>';
                 return;
             }
             table.innerHTML = data.playlists.map(pl => \`
                 <tr>
                     <td>\${escapeHtml(pl.name)}\${pl.protected ? '<span class="fixed-badge">固定</span>' : ''}</td>
                     <td>\${pl.channelCount}</td>
+                    <td>\${pl.refreshTimes && pl.refreshTimes.length > 0 ? pl.refreshTimes.join(', ') : '05:00'}</td>
                     <td>\${new Date(pl.createdAt).toLocaleString()}</td>
                     <td>\${pl.updatedAt ? new Date(pl.updatedAt).toLocaleString() : '-'}</td>
                     <td><a href="\${escapeHtml(pl.url)}" target="_blank">\${escapeHtml(pl.url)}</a></td>
@@ -2580,9 +2610,73 @@ addEventListener('fetch', event => {
 addEventListener('scheduled', event => {
     event.waitUntil((async () => {
         try {
+            // 计算当前北京时间
+            const d = new Date();
+            const nowDate = d.toISOString().slice(0, 10);
+            const nowHour = (d.getUTCHours() + 8) % 24;
+            const nowMinute = d.getUTCMinutes();
+            const nowTime = String(nowHour).padStart(2, '0') + ':' + String(nowMinute).padStart(2, '0');
+
+            // 获取所有数据源，逐源检查是否需要刷新
+            const sources = await getSources();
+            const sourceResults = [];
+            for (const src of sources) {
+                if (!src.enabled) continue;
+                const times = Array.isArray(src.refreshTimes) && src.refreshTimes.length > 0 ? src.refreshTimes : ['05:00'];
+                let shouldRefresh = false;
+                for (const t of times) {
+                    if (t === nowTime) {
+                        const lastKey = 'src_' + src.id + '_' + t;
+                        const last = await SOURCES_KV.get('_lastRef_' + lastKey);
+                        if (last !== nowDate) {
+                            shouldRefresh = true;
+                            await SOURCES_KV.put('_lastRef_' + lastKey, nowDate);
+                        }
+                    }
+                }
+                if (shouldRefresh) {
+                    console.log('定时刷新数据源:', src.name);
+                }
+            }
+
+            // 刷新所有源（保持原有逻辑，但上面的判断已经确保一天只刷新一次）
             await refreshAllSources();
-            const playlistResults = await refreshAllPlaylists();
-            console.log('定时刷新完成:', JSON.stringify({ sources: 'ok', playlists: playlistResults }));
+
+            // 获取所有播放列表，逐列表检查是否需要刷新
+            const playlists = await getPlaylists();
+            const playlistResults = [];
+            for (const [id, pl] of Object.entries(playlists)) {
+                const times = Array.isArray(pl.refreshTimes) && pl.refreshTimes.length > 0 ? pl.refreshTimes : ['05:00'];
+                let shouldRefresh = false;
+                for (const t of times) {
+                    if (t === nowTime) {
+                        const lastKey = 'pl_' + id + '_' + t;
+                        const last = await SOURCES_KV.get('_lastRef_' + lastKey);
+                        if (last !== nowDate) {
+                            shouldRefresh = true;
+                            await SOURCES_KV.put('_lastRef_' + lastKey, nowDate);
+                        }
+                    }
+                }
+                if (shouldRefresh) {
+                    try {
+                        await refreshAllSources();
+                        const r = await rematchPlaylist(id, pl);
+                        await invalidatePlaylistCache('http://localhost', id);
+                        playlistResults.push({ id, name: pl.name, refreshed: true, count: r.newCount });
+                        console.log('定时刷新播放列表:', pl.name);
+                    } catch (err) {
+                        playlistResults.push({ id, name: pl.name, refreshed: false, error: err.message });
+                    }
+                }
+            }
+
+            console.log('定时刷新检查完成:', JSON.stringify({
+                date: nowDate,
+                time: nowTime,
+                sources: sourceResults.length + '个源待检查',
+                playlists: playlistResults
+            }));
         } catch (err) {
             console.error('定时刷新失败:', err.message || err);
         }

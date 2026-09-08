@@ -22,8 +22,6 @@ const vm = require('vm');
 
 const PORT = parseInt(process.env.PORT || '8787', 10);
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
-const REFRESH_TIMES = (process.env.REFRESH_TIMES || '05:00,17:00')
-    .split(',').map(s => s.trim()).filter(Boolean);
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
@@ -167,38 +165,20 @@ const server = http.createServer(async (req, res) => {
     }
 });
 
-// ===================== 定时刷新（北京时间） =====================
-const lastRun = new Map(); // "HH:MM" -> 上次执行的日期（YYYY-MM-DD）
-
-function beijingNow() {
-    const d = new Date();
-    return {
-        date: d.toISOString().slice(0, 10),
-        hour: (d.getUTCHours() + 8) % 24,
-        minute: d.getUTCMinutes()
-    };
-}
-
+// ===================== 定时刷新 =====================
+// 每 30 秒调度一次，由 worker.js 的 scheduled handler 检查各数据源和播放列表的独立刷新时间
 function runScheduledIfDue() {
-    const now = beijingNow();
-    for (const t of REFRESH_TIMES) {
-        const [h, m] = t.split(':').map(Number);
-        if (now.hour === h && now.minute === m && lastRun.get(t) !== now.date) {
-            lastRun.set(t, now.date);
-            console.log(`[${new Date().toISOString()}] 触发定时刷新 ${t}（北京时间）`);
-            if (scheduledHandler) {
-                const ev = {
-                    type: 'scheduled',
-                    waitUntil(p) {
-                        if (p && p.catch) p.catch(err => console.error('定时刷新失败:', err));
-                    }
-                };
-                try {
-                    scheduledHandler(ev);
-                } catch (err) {
-                    console.error('定时刷新异常:', err);
-                }
+    if (scheduledHandler) {
+        const ev = {
+            type: 'scheduled',
+            waitUntil(p) {
+                if (p && p.catch) p.catch(err => console.error('定时刷新失败:', err));
             }
+        };
+        try {
+            scheduledHandler(ev);
+        } catch (err) {
+            console.error('定时刷新异常:', err);
         }
     }
 }
@@ -208,7 +188,7 @@ server.listen(PORT, '0.0.0.0', () => {
     console.log('IPTV 本地服务已启动');
     console.log(`  访问地址 : http://<路由器IP>:${PORT}`);
     console.log(`  数据目录 : ${DATA_DIR}`);
-    console.log(`  定时刷新 : ${REFRESH_TIMES.join(', ')}（北京时间）`);
+    console.log('  定时刷新 : 每30秒检查各源/播放列表的独立刷新时间');
     console.log('==============================================');
 });
 
