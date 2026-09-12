@@ -1,0 +1,12 @@
+services:
+  iptv-local:
+    image: ghcr.io/sunwan523/iptv-local:latest
+    container_name: iptv-local
+    restart: always
+    ports:
+      - "8787:8787"
+    volumes:
+      - /root/iptv-data:/app/data
+    environment:
+      - PORT=8787
+      - DATA_DIR=/app/data
