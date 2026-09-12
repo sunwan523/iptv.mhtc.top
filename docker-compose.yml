@@ -1,12 +1,12 @@
 services:
   iptv-local:
-    image: ghcr.io/sunwan523/iptv-local:latest
+    image: ghcr.nju.edu.cn/sunwan523/iptv-local:latest
     container_name: iptv-local
     restart: always
     ports:
       - "8787:8787"
     volumes:
-      - /docker/Compose/doc_iptv-local/data:/app/data
+      - ./data:/app/data
     environment:
       - PORT=8787
       - DATA_DIR=/app/data
