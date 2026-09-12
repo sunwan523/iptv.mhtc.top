@@ -891,7 +891,7 @@ async function handleRequest(request) {
                 });
             }
             const id = generateSourceId(body.name);
-            const refreshTimes = Array.isArray(body.refreshTimes) ? body.refreshTimes : ['05:00'];
+            const refreshTimes = Array.isArray(body.refreshTimes) ? body.refreshTimes : ['05:00', '17:00'];
             const source = {
                 id: id,
                 name: body.name || '新数据源',
@@ -937,7 +937,7 @@ async function handleRequest(request) {
         if (body.url) src.url = body.url;
         if (body.enabled !== undefined) src.enabled = body.enabled;
         if (body.priority !== undefined) src.priority = body.priority;
-        if (body.refreshTimes !== undefined) src.refreshTimes = Array.isArray(body.refreshTimes) ? body.refreshTimes : ['05:00'];
+        if (body.refreshTimes !== undefined) src.refreshTimes = Array.isArray(body.refreshTimes) ? body.refreshTimes : ['05:00', '17:00'];
         await saveSource(srcId, src);
         return new Response(JSON.stringify({ success: true, source: src }, null, 2), {
             headers: { 'Content-Type': 'application/json; charset=utf-8' }
@@ -1027,7 +1027,7 @@ async function handleRequest(request) {
             name: playlists[id].name,
             protected: isProtectedPlaylist(id, playlists[id]),
             channelCount: playlists[id].channelCount,
-            refreshTimes: playlists[id].refreshTimes || ['05:05'],
+            refreshTimes: playlists[id].refreshTimes || ['05:05', '17:05'],
             url: `/playlist/${id}.m3u`,
             createdAt: playlists[id].createdAt,
             updatedAt: playlists[id].updatedAt
@@ -1098,7 +1098,7 @@ async function handleRequest(request) {
 
             const id = await generatePlaylistId(body.name);
             const now = new Date().toISOString();
-            const refreshTimes = Array.isArray(body.refreshTimes) ? body.refreshTimes : ['05:05'];
+            const refreshTimes = Array.isArray(body.refreshTimes) ? body.refreshTimes : ['05:05', '17:05'];
             const playlist = {
                 name: body.name || id,
                 urls: channels.map(ch => ch.url),
@@ -1155,7 +1155,7 @@ async function handleRequest(request) {
             pl.urls = pl.urls.filter(url => !body.removeUrls.includes(url));
             pl.channelCount = pl.urls.length;
         }
-        if (body.refreshTimes !== undefined) pl.refreshTimes = Array.isArray(body.refreshTimes) ? body.refreshTimes : ['05:05'];
+        if (body.refreshTimes !== undefined) pl.refreshTimes = Array.isArray(body.refreshTimes) ? body.refreshTimes : ['05:05', '17:05'];
         pl.updatedAt = new Date().toISOString();
         await savePlaylist(plId, pl);
         await invalidatePlaylistCache(url.origin, plId);
@@ -1644,7 +1644,7 @@ const FRONTEND_HTML = `
                     </div>
                     <div class="form-group">
                         <label>刷新时间（北京时间 HH:MM，多个用逗号分隔，如 05:00,17:00）</label>
-                        <input type="text" id="sourceRefreshTimes" value="05:00" placeholder="05:00,17:00">
+                        <input type="text" id="sourceRefreshTimes" value="05:00,17:00" placeholder="05:00,17:00">
                     </div>
                     <div class="form-group">
                         <label class="checkbox-label">
@@ -1679,7 +1679,7 @@ const FRONTEND_HTML = `
                     </div>
                     <div class="form-group">
                         <label>刷新时间（北京时间 HH:MM，多个用逗号分隔，如 05:00,17:00）</label>
-                        <input type="text" id="playlistRefreshTimes" value="05:05" placeholder="05:00,17:00">
+                        <input type="text" id="playlistRefreshTimes" value="05:05,17:05" placeholder="05:05,17:05">
                     </div>
                     <button class="btn btn-primary" onclick="createPlaylist()">创建播放列表</button>
                 </div>
@@ -1786,7 +1786,7 @@ const FRONTEND_HTML = `
             </div>
             <div class="form-group">
                 <label>刷新时间（北京时间 HH:MM，多个用逗号分隔）</label>
-                <input type="text" id="editSourceRefreshTimes" value="05:00" placeholder="05:00,17:00">
+                <input type="text" id="editSourceRefreshTimes" value="05:00,17:00" placeholder="05:00,17:00">
             </div>
             <div class="form-group">
                 <label class="checkbox-label">
@@ -2097,7 +2097,7 @@ const FRONTEND_HTML = `
                     <td>\${escapeHtml(src.name)}</td>
                     <td>\${escapeHtml(src.url || '-')}</td>
                     <td>\${escapeHtml(src.priority || 99)}</td>
-                    <td>\${src.refreshTimes && src.refreshTimes.length > 0 ? src.refreshTimes.join(', ') : '05:00'}</td>
+                    <td>\${src.refreshTimes && src.refreshTimes.length > 0 ? src.refreshTimes.join(', ') : '05:00, 17:00'}</td>
                     <td><span class="badge \${src.enabled ? 'badge-success' : 'badge-danger'}">\${src.enabled ? '启用' : '禁用'}</span></td>
                     <td>\${src.updatedAt ? new Date(src.updatedAt).toLocaleString('zh-CN') : '-'}<br><span style="font-size:10px;color:#9ca3af">\${src.createdAt ? new Date(src.createdAt).toLocaleString('zh-CN') : ''}</span></td>
                     <td class="actions">
@@ -2156,7 +2156,7 @@ const FRONTEND_HTML = `
                 document.getElementById('sourceName').value = '';
                 document.getElementById('sourceUrl').value = '';
                 document.getElementById('sourcePriority').value = '99';
-                document.getElementById('sourceRefreshTimes').value = '05:00';
+                document.getElementById('sourceRefreshTimes').value = '05:00,17:00';
                 loadSources();
                 await refreshData();
             } else {
@@ -2171,7 +2171,7 @@ const FRONTEND_HTML = `
             document.getElementById('editSourceName').value = data.name;
             document.getElementById('editSourceUrl').value = data.url;
             document.getElementById('editSourcePriority').value = data.priority || 99;
-            document.getElementById('editSourceRefreshTimes').value = data.refreshTimes && data.refreshTimes.length > 0 ? data.refreshTimes.join(', ') : '05:00';
+            document.getElementById('editSourceRefreshTimes').value = data.refreshTimes && data.refreshTimes.length > 0 ? data.refreshTimes.join(', ') : '05:00, 17:00';
             document.getElementById('editSourceEnabled').checked = data.enabled;
             document.getElementById('editSourceModal').classList.remove('hidden');
         }
@@ -2228,7 +2228,7 @@ const FRONTEND_HTML = `
                 <tr>
                     <td>\${escapeHtml(pl.name)}\${pl.protected ? '<span class="fixed-badge">固定</span>' : ''}</td>
                     <td>\${pl.channelCount}</td>
-                    <td>\${pl.refreshTimes && pl.refreshTimes.length > 0 ? pl.refreshTimes.join(', ') : '05:05'}</td>
+                    <td>\${pl.refreshTimes && pl.refreshTimes.length > 0 ? pl.refreshTimes.join(', ') : '05:05, 17:05'}</td>
                     <td>\${new Date(pl.createdAt).toLocaleString()}</td>
                     <td>\${pl.updatedAt ? new Date(pl.updatedAt).toLocaleString() : '-'}</td>
                     <td><a href="\${escapeHtml(pl.url)}" target="_blank">\${escapeHtml(pl.url)}</a></td>
@@ -2632,7 +2632,7 @@ addEventListener('scheduled', event => {
             const sources = await getSources();
             for (const src of sources) {
                 if (!src.enabled) continue;
-                const times = Array.isArray(src.refreshTimes) && src.refreshTimes.length > 0 ? src.refreshTimes : ['05:00'];
+                const times = Array.isArray(src.refreshTimes) && src.refreshTimes.length > 0 ? src.refreshTimes : ['05:00', '17:00'];
                 for (const t of times) {
                     if (t === nowTime) {
                         const lastKey = 'src_' + src.id + '_' + t;
@@ -2655,7 +2655,7 @@ addEventListener('scheduled', event => {
             const playlists = await getPlaylists();
             const playlistResults = [];
             for (const [id, pl] of Object.entries(playlists)) {
-                const times = Array.isArray(pl.refreshTimes) && pl.refreshTimes.length > 0 ? pl.refreshTimes : ['05:05'];
+                const times = Array.isArray(pl.refreshTimes) && pl.refreshTimes.length > 0 ? pl.refreshTimes : ['05:05', '17:05'];
                 let shouldRefresh = false;
                 for (const t of times) {
                     if (t === nowTime) {
