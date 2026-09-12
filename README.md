@@ -328,11 +328,13 @@ services:
 
 ### 部署步骤
 
-1. **保存 Compose**，爱快会自动在 `/docker/Compose/doc_iptv-local/` 下落盘
-2. **爱快文件管理** → 找到这个目录，**手动建 `data` 文件夹**（爱快不会自动建）
-3. （可选）如果数据目录还要手动建子目录，进 `data/` 后再建 `sources_kv` 和 `playlists_kv`（容器启动时也会自动建，不急）
-4. **爱快 Docker → 编排 → 点开启**，镜像从 ghcr.nju.edu.cn 拉取，几分钟后完成
-5. **访问** `http://<爱快IP>:8787`
+1. **爱快 Docker → 高级设置 / 镜像源**，添加南京大学 ghcr 加速：`https://ghcr.nju.edu.cn`（可选，仅 Docker Hub 加速；本项目 Compose 里 image 已直接写 `ghcr.nju.edu.cn` 开头，这步只是让其他项目也受益）
+2. **新建 Compose**：爱快 Docker → 编排 → 新建，粘贴上面的 YAML
+3. **保存 Compose**，爱快会自动在 `/docker/Compose/doc_iptv-local/` 下落盘
+4. **爱快文件管理** → 找到这个目录，**手动建 `data` 文件夹**（爱快不会自动建）
+5. （可选）进 `data/` 后再建 `sources_kv` 和 `playlists_kv`（容器启动时也会自动建，不急）
+6. **爱快 Docker → 编排 → 点开启**，镜像从 ghcr.nju.edu.cn 拉取，几分钟后完成
+7. **访问** `http://<爱快IP>:8787`
 
 ### 数据迁移（从 iStoreOS / Cloudflare）
 
