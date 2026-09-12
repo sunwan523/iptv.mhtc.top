@@ -10,7 +10,7 @@
 | 定时刷新机制（重点） | [定时刷新](#定时刷新) |
 | Cloudflare Workers 部署 | [Cloudflare Workers 部署](#cloudflare-workers-部署) |
 | iStoreOS 软路由部署 | [istoreos-软路由部署推荐](#istoreos-软路由部署推荐) |
-| Dockerfile 废弃了什么 | [爱快软路由备选](#爱快软路由备选) |
+| 爱快 Compose 部署 | [爱快软路由部署](#爱快软路由部署compose实测通过) |
 | API 接口清单 | [api-接口清单](#api-接口清单) |
 | 固定映射推送 | [固定映射推送接口](#固定映射推送接口) |
 | 管理后台使用 | [管理后台操作指南](#管理后台操作指南) |
@@ -300,34 +300,74 @@ docker buildx build --platform linux/amd64,linux/arm64 `
 
 构建成功后 iStoreOS 上 `docker pull` + 重启容器即可。
 
-## 爱快软路由（备选，未采用）
+## 爱快软路由部署（Compose，实测通过）
 
-如果不用 iStoreOS，爱快也能跑，但步骤稍麻烦（需要上传 tar 镜像）。
+爱快支持 Docker Compose（爱快 Docker 管理界面 → 编排），但有两个**限制**必须注意：
 
-**本机构建并导出 tar：**
+1. **镜像源 ghcr.io 拉不动**：爱快直连 GitHub Container Registry 超时，必须用南京大学镜像加速 `ghcr.nju.edu.cn`
+2. **挂载路径不能写绝对路径**：爱快要求 volumes 写**相对路径**（Compose 文件所在目录下），不能写命名卷，也不能写 `/root/xxx` 这种绝对路径
 
-```powershell
-# 方式一：手工命令
-docker buildx build --platform linux/amd64,linux/arm64 -t iptv-local:latest .
-docker save -o iptv-local.tar iptv-local:latest
+### Compose 文件（直接粘贴）
 
-# 方式二：用仓库自带脚本
-powershell -ExecutionPolicy Bypass -File build-image.ps1
+爱快 Docker → 编排 → 新建，粘贴：
+
+```yaml
+services:
+  iptv-local:
+    image: ghcr.nju.edu.cn/sunwan523/iptv-local:latest
+    container_name: iptv-local
+    restart: always
+    ports:
+      - "8787:8787"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - PORT=8787
+      - DATA_DIR=/app/data
 ```
 
-**爱快上部署：**
+### 部署步骤
 
-1. 确认爱快已开启 Docker，磁盘管理中有「普通存储」分区
-2. **磁盘管理 → 文件管理**，上传 `iptv-local.tar`
-3. 新建数据文件夹（如 `iptv-data`）用于持久化
-4. **系统设置 → Docker → 镜像管理 → 添加**，引用上传的 tar 路径加载镜像
-5. **Docker → 接口管理**，添加独立网段（如 `172.18.0.0/24`）
-6. **容器列表 → 添加容器**：
-   - 镜像选 `iptv-local`
-   - 内存 256MB
-   - 开机自启：勾选
-   - 挂载目录：源路径 = 第 3 步建的文件夹，目标路径 = `/app/data`
-7. 启动容器，查看容器 IP 并用该 IP 访问 `:8787`
+1. **保存 Compose**，爱快会自动在 `/docker/Compose/doc_iptv-local/` 下落盘
+2. **爱快文件管理** → 找到这个目录，**手动建 `data` 文件夹**（爱快不会自动建）
+3. （可选）如果数据目录还要手动建子目录，进 `data/` 后再建 `sources_kv` 和 `playlists_kv`（容器启动时也会自动建，不急）
+4. **爱快 Docker → 编排 → 点开启**，镜像从 ghcr.nju.edu.cn 拉取，几分钟后完成
+5. **访问** `http://<爱快IP>:8787`
+
+### 数据迁移（从 iStoreOS / Cloudflare）
+
+全新容器是空的，需要把旧数据搬过来：
+
+**第一步：从旧设备导出**（旧 iStoreOS 能 SSH 的话）：
+```powershell
+# Windows 本机执行
+scp -r root@192.168.100.88:/root/iptv-data/sources_kv d:\codex\iptv.mhtc.top\data\
+scp -r root@192.168.100.88:/root/iptv-data/playlists_kv d:\codex\iptv.mhtc.top\data\
+```
+
+**第二步：导入到爱快**：
+- 爱快文件管理进入 `/docker/Compose/doc_iptv-local/data/sources_kv/`，把 Windows 上 `d:\codex\iptv.mhtc.top\data\sources_kv\` 里的所有文件上传
+- 同理进入 `playlists_kv/`，上传对应文件
+- 爱快 Docker → 容器管理 → **重启 `iptv-local`**
+
+### 镜像更新（以后升级）
+
+```yaml
+# Compose 里 image 保持 ghcr.nju.edu.cn/sunwan523/iptv-local:latest
+# 爱快 Docker → 镜像管理 → 先手动拉取新版本
+# 或直接在 Compose 编排里改 image 后重新点开启（爱快会自动拉）
+```
+
+### 爱快限制总结
+
+| 爱快限制 | 本项目的应对 |
+|---------|------------|
+| 禁止命名卷 (`iptv-data:`) | 用相对路径 `./data` |
+| 禁止绝对路径挂载 (`/root/xxx`) | 用相对路径 `./data` |
+| ghcr.io 超时 | 改用 `ghcr.nju.edu.cn` 加速 |
+| 不能本地上传镜像 tar | 直接用远程镜像 |
+| 不能 SSH | 全靠 Web 界面 + 文件管理 |
+| Compose 点"开启"无反应/超时 | 镜像在后台拉取，等 3-5 分钟刷新容器列表 |
 
 ## API 接口清单
 
