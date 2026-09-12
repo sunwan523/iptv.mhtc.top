@@ -625,6 +625,7 @@ async function refreshAllSources() {
         const sources = await getSources();
         const enabledSources = sources.filter(s => s.enabled);
         const sourceDetails = [];
+        const nowIso = new Date().toISOString();
         
         const results = await Promise.all(
             enabledSources.map(async src => {
@@ -648,6 +649,9 @@ async function refreshAllSources() {
                     }
                     const channels = parseSourceContent(content, src.priority || 99);
                     sourceDetails.push({ name: src.name, url: src.url || '-', count: channels.length });
+                    // 更新每个源的 updatedAt 时间戳
+                    src.updatedAt = nowIso;
+                    await saveSource(src.id, src);
                     return channels;
                 } catch (err) {
                     sourceDetails.push({ name: src.name, url: src.url || '-', error: err.message || String(err), count: 0 });
@@ -2610,12 +2614,17 @@ addEventListener('fetch', event => {
 addEventListener('scheduled', event => {
     event.waitUntil((async () => {
         try {
-            // 计算当前北京时间
+            // 计算当前北京时间（注意：用北京时间日期而不是 UTC 日期）
             const d = new Date();
-            const nowDate = d.toISOString().slice(0, 10);
-            const nowHour = (d.getUTCHours() + 8) % 24;
-            const nowMinute = d.getUTCMinutes();
+            const utcMs = d.getTime();
+            const beijingMs = utcMs + 8 * 60 * 60 * 1000;
+            const beijing = new Date(beijingMs);
+            const nowDate = beijing.toISOString().slice(0, 10); // 北京时间日期
+            const nowHour = beijing.getUTCHours();
+            const nowMinute = beijing.getUTCMinutes();
             const nowTime = String(nowHour).padStart(2, '0') + ':' + String(nowMinute).padStart(2, '0');
+
+            console.log('[定时检查] 当前北京时间:', nowDate, nowTime);
 
             let needRefreshSources = false;
 
@@ -2665,7 +2674,11 @@ addEventListener('scheduled', event => {
                             await refreshAllSources();
                         }
                         const r = await rematchPlaylist(id, pl);
-                        await invalidatePlaylistCache('http://localhost', id);
+                        // 清理缓存：尝试多种可能的 origin
+                        const origins = ['http://localhost', 'https://localhost', 'http://127.0.0.1', 'http://192.168.100.88:8787', 'https://iptv.mhtc.top'];
+                        for (const origin of origins) {
+                            try { await invalidatePlaylistCache(origin, id); } catch {}
+                        }
                         playlistResults.push({ id, name: pl.name, refreshed: true, count: r.newCount });
                         console.log('定时刷新播放列表:', pl.name, '时间:', nowTime);
                     } catch (err) {
