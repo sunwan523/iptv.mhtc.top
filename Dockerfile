@@ -12,8 +12,7 @@ COPY worker.js /app/worker.js
 RUN mkdir -p /app/data
 
 ENV PORT=8787 \
-    DATA_DIR=/app/data \
-    REFRESH_TIMES=05:00,17:00
+    DATA_DIR=/app/data
 
 EXPOSE 8787
 
