@@ -6,10 +6,7 @@ services:
     ports:
       - "8787:8787"
     volumes:
-      - iptv-data:/app/data
+      - /docker/Compose/doc_iptv-local/data:/app/data
     environment:
       - PORT=8787
       - DATA_DIR=/app/data
-
-volumes:
-  iptv-data:
