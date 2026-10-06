@@ -21,6 +21,7 @@ let cacheData = {
 // ===== KV 聚合 key 常量 =====
 const ALL_SOURCES_KEY = '_all_sources';
 const ALL_PLAYLISTS_KEY = '_all_playlists';
+const CHANNEL_PREFS_KEY = '_channel_prefs';
 const CHMAP_PREFIX = 'chmap:';
 
 // Worker isolate 内存缓存（减少同一 isolate 内的 KV 调用）
@@ -238,16 +239,33 @@ function getChannelKey(name) {
     }
 }
 
-// 合并去重（支持优先级）
+// 合并去重（支持优先级 + 合并多来源信息）
 function mergeChannels(results) {
     const seenUrl = new Map(); // url -> channel
     const urlOrder = []; // maintain insertion order
-    
+
     for (const result of results) {
         for (const ch of result) {
-            if (seenUrl.has(ch.url)) continue;
-            seenUrl.set(ch.url, ch);
-            urlOrder.push(ch);
+            if (seenUrl.has(ch.url)) {
+                // 同 URL 已存在，合并来源信息
+                const existing = seenUrl.get(ch.url);
+                if (!existing.sources) {
+                    existing.sources = [{ sourceName: existing.sourceName, sourceId: existing.sourceId, priority: existing.priority }];
+                }
+                // 避免重复来源
+                const alreadyHas = existing.sources.some(s => s.sourceId === ch.sourceId);
+                if (!alreadyHas) {
+                    existing.sources.push({ sourceName: ch.sourceName, sourceId: ch.sourceId, priority: ch.priority });
+                }
+                // 保留优先级最高的（数字最小的）那个 group 信息
+                if (ch.priority < existing.priority) {
+                    existing.group = ch.group;
+                    existing.priority = ch.priority;
+                }
+            } else {
+                seenUrl.set(ch.url, ch);
+                urlOrder.push(ch);
+            }
         }
     }
     return urlOrder;
@@ -261,12 +279,12 @@ function escapeM3UName(value) {
     return String(value == null ? '' : value).replace(/[\r\n]+/g, ' ').replace(/,/g, '，');
 }
 
-// 生成 M3U（同名频道合并多个源，按优先级排序）
+// 生成 M3U（同名频道合并多个源，按优先级排序，可应用用户偏好）
 // baseUrl 可选，指定后会将有固定映射的频道地址转为跳转链接
 async function genM3U(channels, baseUrl) {
     // 预加载所有固定映射 ID，用于将实地址转为跳转地址
     const mappingIdSet = new Set(baseUrl ? await getAllChannelIds() : []);
-    
+
     function toOutputUrl(url) {
         if (!baseUrl) return url;
         const cid = extractChannelId(url);
@@ -275,31 +293,21 @@ async function genM3U(channels, baseUrl) {
         }
         return url;
     }
-    
+
+    // 用 buildMergedChannels 合并 + applyChannelPreferences 应用用户偏好
+    const groups = buildMergedChannels();
+    const prefs = await loadChannelPrefs();
+    applyChannelPreferences(groups, prefs);
+
     let m3u = '#EXTM3U\n';
-    const grouped = new Map(); // key -> { info, urls: [] }
-    for (const ch of channels) {
-        const key = getChannelKey(ch.name);
-        if (!grouped.has(key)) {
-            grouped.set(key, {
-                name: ch.name,
-                group: ch.group,
-                tvgId: ch.tvgId || '',
-                tvgLogo: ch.tvgLogo || '',
-                tvgName: ch.tvgName || '',
-                urls: []
-            });
-        }
-        grouped.get(key).urls.push(toOutputUrl(ch.url));
-    }
-    for (const ch of grouped.values()) {
+    for (const g of groups) {
         m3u += '#EXTINF:-1';
-        if (ch.tvgId) m3u += ` tvg-id="${escapeM3UAttr(ch.tvgId)}"`;
-        if (ch.tvgLogo) m3u += ` tvg-logo="${escapeM3UAttr(ch.tvgLogo)}"`;
-        if (ch.tvgName) m3u += ` tvg-name="${escapeM3UAttr(ch.tvgName)}"`;
+        if (g.tvgId) m3u += ` tvg-id="${escapeM3UAttr(g.tvgId)}"`;
+        if (g.tvgLogo) m3u += ` tvg-logo="${escapeM3UAttr(g.tvgLogo)}"`;
+        if (g.tvgName) m3u += ` tvg-name="${escapeM3UAttr(g.tvgName)}"`;
         m3u += ` group-title="${escapeM3UAttr(CONFIG.GROUP_NAME)}"`;
-        m3u += ',' + escapeM3UName(ch.name) + '\n';
-        for (const url of ch.urls) {
+        m3u += ',' + escapeM3UName(g.name) + '\n';
+        for (const url of g.urls) {
             m3u += url + '\n';
         }
     }
@@ -334,14 +342,70 @@ function buildMergedChannels() {
                 tvgLogo: ch.tvgLogo || '',
                 tvgName: ch.tvgName || '',
                 urlCount: 0,
-                urls: []
+                urls: [],
+                sourcesMap: new Map() // sourceId -> sourceName
             });
         }
         const g = grouped.get(key);
         g.urls.push(ch.url);
         g.urlCount++;
+        // 收集来源信息
+        if (ch.sources && ch.sources.length > 0) {
+            for (const s of ch.sources) {
+                g.sourcesMap.set(s.sourceId, s.sourceName);
+            }
+        } else if (ch.sourceId) {
+            g.sourcesMap.set(ch.sourceId, ch.sourceName);
+        }
     }
-    return Array.from(grouped.values());
+    // 把 sourcesMap 转成数组，方便前端消费
+    return Array.from(grouped.values()).map(g => {
+        const sources = Array.from(g.sourcesMap.entries()).map(([id, name]) => ({ sourceId: id, sourceName: name }));
+        delete g.sourcesMap;
+        g.sources = sources;
+        return g;
+    });
+}
+
+// ===== 频道来源偏好 =====
+// 偏好存储：{ channelKey: { urls: [url1, url2, ...], updatedAt: 'ISO' } }
+// urls 数组是用户选定并排序后的 URL 列表
+
+async function loadChannelPrefs() {
+    try {
+        if (!SOURCES_KV) return {};
+        const data = await SOURCES_KV.get(CHANNEL_PREFS_KEY);
+        if (!data) return {};
+        const prefs = JSON.parse(data);
+        return prefs && typeof prefs === 'object' ? prefs : {};
+    } catch { return {}; }
+}
+
+async function saveChannelPrefs(prefs) {
+    await SOURCES_KV.put(CHANNEL_PREFS_KEY, JSON.stringify(prefs));
+}
+
+// 应用偏好到频道组：过滤掉没选的 URL，按偏好排序
+// prefs: { channelKey: { urls: [...], updatedAt } }
+// groups: buildMergedChannels() 的输出 [{ key, urls, sources, ... }]
+// 返回修改后的 groups
+function applyChannelPreferences(groups, prefs) {
+    if (!prefs || typeof prefs !== 'object') return groups;
+    for (const g of groups) {
+        const pref = prefs[g.key];
+        if (!pref || !Array.isArray(pref.urls) || pref.urls.length === 0) continue;
+        // 过滤 + 排序：只保留偏好里的 URL，按偏好顺序排列
+        const prefUrlSet = new Set(pref.urls);
+        // 先把偏好里还存在的 URL 挑出来，按偏好顺序
+        const filtered = pref.urls.filter(url => g.urls.includes(url));
+        // 再把不在偏好里但频道实际有的 URL 追加在后面（保底）
+        for (const url of g.urls) {
+            if (!prefUrlSet.has(url)) filtered.push(url);
+        }
+        g.urls = filtered;
+        g.urlCount = filtered.length;
+    }
+    return groups;
 }
 
 // ===== 数据源管理 =====
@@ -790,6 +854,11 @@ async function refreshAllSources() {
                         content = await resp.text();
                     }
                     const channels = parseSourceContent(content, src.priority || 99);
+                    // 注入来源信息，用于前端筛选和展示
+                    for (const ch of channels) {
+                        ch.sourceName = src.name;
+                        ch.sourceId = src.id;
+                    }
                     sourceDetails.push({ name: src.name, url: src.url || '-', count: channels.length });
                     // 更新每个源的 updatedAt 时间戳
                     src.updatedAt = nowIso;
@@ -943,11 +1012,14 @@ async function handleRequest(request) {
     // API - 获取合并后的频道组（前端展示用）
     if (path === '/api/merged-channels') {
         const merged = buildMergedChannels();
-        let result = merged;
+        // 加载并应用用户偏好（过滤+排序）
+        const prefs = await loadChannelPrefs();
+        const withPrefs = applyChannelPreferences(merged, prefs);
+        let result = withPrefs;
         const search = query.get('search');
         if (search) {
             const kw = search.toLowerCase();
-            result = merged.filter(g => g.name.toLowerCase().includes(kw));
+            result = result.filter(g => g.name.toLowerCase().includes(kw));
         }
         const group = query.get('group');
         if (group) {
@@ -962,6 +1034,36 @@ async function handleRequest(request) {
         }, null, 2), {
             headers: { 'Content-Type': 'application/json; charset=utf-8' }
         });
+    }
+
+    // API - 获取/保存频道来源偏好
+    if (path === '/api/channel-prefs') {
+        if (method === 'GET') {
+            const prefs = await loadChannelPrefs();
+            return new Response(JSON.stringify({ prefs }), {
+                headers: { 'Content-Type': 'application/json; charset=utf-8' }
+            });
+        }
+        if (method === 'PUT') {
+            try {
+                const body = await request.json();
+                const prefs = body.prefs || body;
+                if (!prefs || typeof prefs !== 'object') {
+                    return new Response(JSON.stringify({ success: false, error: '格式错误' }), { status: 400 });
+                }
+                // 为每个 prefs 条目更新 updatedAt
+                const nowIso = new Date().toISOString();
+                for (const key of Object.keys(prefs)) {
+                    prefs[key].updatedAt = nowIso;
+                }
+                await saveChannelPrefs(prefs);
+                return new Response(JSON.stringify({ success: true, count: Object.keys(prefs).length }), {
+                    headers: { 'Content-Type': 'application/json; charset=utf-8' }
+                });
+            } catch (err) {
+                return new Response(JSON.stringify({ success: false, error: err.message }), { status: 500 });
+            }
+        }
     }
 
     // API - 获取分类
@@ -1737,6 +1839,31 @@ const FRONTEND_HTML = `
         .btn-remove { background: #ef4444; color: white; padding: 4px 8px; border: none; border-radius: 4px; cursor: pointer; }
         .btn-sm { padding: 4px 10px; font-size: 12px; }
         .name-input { width: 120px; padding: 3px 6px; border: 1px solid #d1d5db; border-radius: 3px; font-size: 13px; }
+        /* === 频道来源偏好 新样式 === */
+        .source-filter-bar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; padding: 10px; background: #f9fafb; border-radius: 6px; align-items: center; }
+        .source-filter-bar label { font-size: 12px; color: #6b7280; margin-right: 4px; }
+        .source-tag { padding: 3px 10px; border-radius: 14px; cursor: pointer; font-size: 12px; user-select: none; background: #f3f4f6; color: #374151; border: 1px solid transparent; transition: all 0.15s; }
+        .source-tag.active { background: #3b82f6; color: white; }
+        .source-tag.exclude { background: #fee2e2; color: #991b1b; border-color: #fecaca; text-decoration: line-through; }
+        .source-tag .count { margin-left: 4px; font-size: 11px; opacity: 0.75; }
+        .channel-sources-row { margin-top: 4px; display: flex; flex-wrap: wrap; gap: 3px; }
+        .channel-source-chip { font-size: 10px; background: #e0e7ff; color: #3730a3; padding: 1px 6px; border-radius: 8px; }
+        .channel-source-chip.multi { background: #fef3c7; color: #92400e; }
+        .channel-item .btn-source-pref { margin-left: 8px; padding: 2px 8px; font-size: 11px; background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; border-radius: 4px; cursor: pointer; }
+        .channel-item .btn-source-pref:hover { background: #dbeafe; }
+        .channel-item .btn-source-pref.pref-set { background: #d1fae5; color: #065f46; border-color: #a7f3d0; }
+        .source-pref-item { display: flex; align-items: center; gap: 10px; padding: 8px 10px; background: #f9fafb; border-radius: 6px; margin-bottom: 6px; }
+        .source-pref-item .handle { cursor: grab; color: #9ca3af; user-select: none; font-size: 16px; }
+        .source-pref-item .handle:active { cursor: grabbing; }
+        .source-pref-item input[type="checkbox"] { flex-shrink: 0; }
+        .source-pref-item .url-text { flex: 1; font-family: monospace; font-size: 12px; color: #374151; word-break: break-all; }
+        .source-pref-item .src-tag { font-size: 10px; padding: 1px 6px; border-radius: 8px; background: #dbeafe; color: #1e40af; flex-shrink: 0; }
+        .source-pref-item .src-tag.multi { background: #fef3c7; color: #92400e; }
+        .source-pref-item button.up, .source-pref-item button.down { padding: 2px 6px; border: 1px solid #d1d5db; background: white; border-radius: 3px; cursor: pointer; font-size: 11px; }
+        .source-pref-item button:disabled { opacity: 0.3; cursor: not-allowed; }
+        .pref-hint { font-size: 12px; color: #6b7280; margin-bottom: 12px; padding: 8px; background: #fef3c7; border-radius: 4px; border-left: 3px solid #f59e0b; }
+        .pref-hint.ok { background: #d1fae5; border-left-color: #10b981; color: #065f46; }
+        .active-filters-info { font-size: 12px; color: #6b7280; margin-left: auto; }
     </style>
 </head>
 <body>
@@ -1885,6 +2012,10 @@ const FRONTEND_HTML = `
                         <div class="value" id="totalCategories">-</div>
                         <div class="label">分类数</div>
                     </div>
+                    <div class="status-item">
+                        <div class="value" id="prefCount">0</div>
+                        <div class="label">已设偏好</div>
+                    </div>
                 </div>
                 
                 <div class="search-box">
@@ -1893,13 +2024,21 @@ const FRONTEND_HTML = `
                 
                 <div class="category-filter" id="categoryFilter"></div>
                 
+                <div class="source-filter-bar" id="sourceFilterBar">
+                    <label>按来源筛选:</label>
+                    <span class="source-tag active" data-src="" onclick="toggleSourceFilter(this)">全部</span>
+                    <span id="sourceFilterTags"></span>
+                    <span class="active-filters-info" id="activeFiltersInfo"></span>
+                </div>
+                
                 <div class="select-controls">
                     <label class="checkbox-label">
                         <input type="checkbox" id="selectAll" onchange="toggleSelectAll()"> 全选
                     </label>
-                    <button class="btn btn-secondary" onclick="selectCurrentPage()">选中当前页</button>
-                    <button class="btn btn-secondary" onclick="clearSelection()">清除选择</button>
-                    <button class="btn btn-success" onclick="createPlaylistFromSelection()">从选中创建播放列表</button>
+                    <button class="btn btn-secondary btn-sm" onclick="selectCurrentPage()">选中当前页</button>
+                    <button class="btn btn-secondary btn-sm" onclick="clearSelection()">清除选择</button>
+                    <button class="btn btn-success btn-sm" onclick="createPlaylistFromSelection()">从选中创建播放列表</button>
+                    <button class="btn btn-secondary btn-sm" onclick="resetAllPrefs()">重置全部偏好</button>
                 </div>
                 
                 <div id="channelList" class="loading">加载中...</div>
@@ -1977,6 +2116,21 @@ const FRONTEND_HTML = `
         </div>
     </div>
 
+    <!-- 频道来源偏好弹窗 -->
+    <div class="modal-overlay hidden" id="sourcePrefModal">
+        <div class="modal">
+            <div class="modal-title" id="sourcePrefTitle">来源选择</div>
+            <input type="hidden" id="sourcePrefChannelKey">
+            <div id="sourcePrefHint" class="pref-hint">勾选要保留的 URL，拖动或用 ↑↓ 调整优先级顺序。只有勾选的会进入 M3U 输出。</div>
+            <div id="sourcePrefList"></div>
+            <div class="modal-footer">
+                <button class="btn btn-danger btn-sm" onclick="clearCurrentChannelPref()">清除该频道偏好</button>
+                <button class="btn btn-secondary" onclick="closeSourcePrefModal()">取消</button>
+                <button class="btn btn-primary" onclick="saveSourcePref()">保存</button>
+            </div>
+        </div>
+    </div>
+
     <script>
         let allChannels = [];
         let selectedChannels = new Set();
@@ -2040,15 +2194,90 @@ const FRONTEND_HTML = `
             document.getElementById('lastUpdate').textContent = data.lastUpdated ? '最后更新: ' + new Date(data.lastUpdated).toLocaleString() : '-';
         }
         
+        // === 频道来源偏好相关全局变量 ===
+        let channelPrefs = {};           // 从 /api/channel-prefs 加载
+        let sourceFilterSelected = '';   // 选中的来源名（空=全部）
+        let sourceFilterExclude = '';    // 排除的来源名（空=无排除）
+
         async function loadChannels() {
             const res = await fetch('/api/merged-channels');
             const data = await res.json();
             allChannels = data.channels;
             selectedChannels.clear();
             currentPage = 1;
+            // 同时加载用户偏好
+            const prefRes = await fetch('/api/channel-prefs');
+            const prefData = await prefRes.json();
+            channelPrefs = prefData.prefs || {};
+            document.getElementById('prefCount').textContent = Object.keys(channelPrefs).length;
+            // 渲染
+            renderSourceFilterTags();
             renderChannels();
             renderCategories(data.categories);
             renderPagination();
+            document.getElementById('totalChannels').textContent = data.total || allChannels.length;
+        }
+        
+        // 渲染来源筛选标签（从 allChannels.sources 提取）
+        function renderSourceFilterTags() {
+            const srcSet = new Set();
+            for (const ch of allChannels) {
+                if (ch.sources) for (const s of ch.sources) srcSet.add(s.sourceName);
+            }
+            const sorted = Array.from(srcSet).sort();
+            const tagHtml = sorted.map(name => \`
+                <span class="source-tag" data-src="\${jsArg(name)}" 
+                      onclick="toggleSourceFilter(this)">
+                    \${escapeHtml(name)}<span class="count"></span>
+                </span>
+            \`).join('');
+            document.getElementById('sourceFilterTags').innerHTML = tagHtml;
+        }
+
+        function toggleSourceFilter(el) {
+            const src = el.dataset.src;
+            // 点击"全部"
+            if (src === '') {
+                sourceFilterSelected = '';
+                sourceFilterExclude = '';
+                document.querySelectorAll('.source-tag').forEach(t => { t.classList.remove('active', 'exclude'); });
+                el.classList.add('active');
+            } else {
+                const filterBar = document.getElementById('sourceFilterBar');
+                // Shift 点击 = 排除模式
+                const selectedActive = document.querySelector('.source-tag[data-src=""]').classList.contains('active') || sourceFilterSelected === '';
+                // 判断当前点击的是哪个：按住 shift 或已选中后再点 = 排除
+                if (sourceFilterSelected === src) {
+                    // 取消选中，切回"全部"
+                    sourceFilterSelected = '';
+                    sourceFilterExclude = '';
+                    document.querySelectorAll('.source-tag').forEach(t => { t.classList.remove('active', 'exclude'); });
+                    document.querySelector('.source-tag[data-src=""]').classList.add('active');
+                } else if (sourceFilterExclude === src) {
+                    // 取消排除
+                    sourceFilterExclude = '';
+                    el.classList.remove('exclude');
+                    // 如果没筛选了，切回全部
+                    if (!sourceFilterSelected) {
+                        document.querySelector('.source-tag[data-src=""]').classList.add('active');
+                    }
+                } else {
+                    // 普通点击 = 选中；先清空之前的 active/exclude
+                    document.querySelectorAll('.source-tag').forEach(t => { t.classList.remove('active', 'exclude'); });
+                    document.querySelector('.source-tag[data-src=""]').classList.remove('active');
+                    sourceFilterSelected = src;
+                    sourceFilterExclude = '';
+                    el.classList.add('active');
+                    if (event && event.shiftKey) {
+                        // shift 点击 = 排除
+                        sourceFilterSelected = '';
+                        sourceFilterExclude = src;
+                        el.classList.remove('active');
+                        el.classList.add('exclude');
+                    }
+                }
+            }
+            filterChannels();
         }
         
         function renderChannels() {
@@ -2067,9 +2296,19 @@ const FRONTEND_HTML = `
                     <input type="checkbox" class="channel-checkbox" \${selectedChannels.has(ch.key) ? 'checked' : ''} onchange="toggleChannel('\${jsArg(ch.key)}')">
                     <img class="channel-logo" src="\${escapeHtml(ch.tvgLogo || '')}" onerror="this.style.display='none'">
                     <div class="channel-info">
-                        <div class="channel-name">\${escapeHtml(ch.name)}\${ch.urlCount > 1 ? ' <span class="source-badge">' + escapeHtml(ch.urlCount) + '源</span>' : ''}</div>
+                        <div class="channel-name">
+                            \${escapeHtml(ch.name)}
+                            \${ch.urlCount > 1 ? '<span class="source-badge">' + ch.urlCount + '源</span>' : ''}
+                            \${channelPrefs[ch.key] ? '<span class="badge badge-success" style="margin-left:6px;font-size:10px;">已设偏好</span>' : ''}
+                        </div>
                         <div class="channel-group">\${escapeHtml(ch.group)}</div>
+                        <div class="channel-sources-row">
+                            \${(ch.sources || []).map(s => '<span class="channel-source-chip">' + escapeHtml(s.sourceName) + '</span>').join('')}
+                        </div>
                     </div>
+                    <button class="btn-source-pref \${channelPrefs[ch.key] ? 'pref-set' : ''}" onclick="openSourcePrefModal('\${jsArg(ch.key)}')">
+                        \${channelPrefs[ch.key] ? '改来源' : '选来源'}
+                    </button>
                 </div>
             \`).join('');
         }
@@ -2164,6 +2403,19 @@ const FRONTEND_HTML = `
             if (activeCat && activeCat !== '全部') {
                 channels = channels.filter(ch => ch.group === activeCat);
             }
+            // 来源筛选
+            if (sourceFilterSelected) {
+                channels = channels.filter(ch => (ch.sources || []).some(s => s.sourceName === sourceFilterSelected));
+            }
+            if (sourceFilterExclude) {
+                channels = channels.filter(ch => !(ch.sources || []).some(s => s.sourceName === sourceFilterExclude));
+            }
+            // 更新筛选信息
+            const info = document.getElementById('activeFiltersInfo');
+            let parts = [];
+            if (sourceFilterSelected) parts.push('仅显示: ' + sourceFilterSelected);
+            if (sourceFilterExclude) parts.push('排除: ' + sourceFilterExclude);
+            info.textContent = parts.length > 0 ? parts.join(' | ') : '';
             return channels;
         }
         
@@ -2173,6 +2425,173 @@ const FRONTEND_HTML = `
             renderChannels();
             renderPagination();
             document.getElementById('filteredChannels').textContent = channels.length;
+        }
+
+        // ===== 来源偏好弹窗相关 =====
+        let currentPrefChannelKey = null;
+        let tempPrefState = null; // [{ url, sourceName, checked, originalIdx }]
+
+        function openSourcePrefModal(keyEncoded) {
+            const key = decodeURIComponent(keyEncoded);
+            currentPrefChannelKey = key;
+            // 找到频道
+            const ch = allChannels.find(c => c.key === key);
+            if (!ch) return;
+            document.getElementById('sourcePrefTitle').textContent = '来源偏好 — ' + ch.name;
+            document.getElementById('sourcePrefChannelKey').value = key;
+            // 加载已有偏好
+            const existingPref = channelPrefs[key];
+            // 构造 tempPrefState：每个 URL 带勾选状态和排序位置
+            let urls;
+            if (existingPref && existingPref.urls) {
+                // 已有偏好：按偏好顺序 + 偏好里选中的 URL
+                const prefUrlSet = new Set(existingPref.urls);
+                urls = [...ch.urls];
+                // 先排偏好里的（按偏好顺序），再排剩余的
+                urls.sort((a, b) => {
+                    const ai = existingPref.urls.indexOf(a);
+                    const bi = existingPref.urls.indexOf(b);
+                    if (ai >= 0 && bi >= 0) return ai - bi;
+                    if (ai >= 0) return -1;
+                    if (bi >= 0) return 1;
+                    return 0;
+                });
+                tempPrefState = urls.map(url => ({
+                    url,
+                    sourceName: getSourceNameForUrl(ch, url),
+                    checked: prefUrlSet.has(url)
+                }));
+            } else {
+                // 无偏好：默认全选
+                tempPrefState = ch.urls.map(url => ({
+                    url,
+                    sourceName: getSourceNameForUrl(ch, url),
+                    checked: true
+                }));
+            }
+            // 更新 hint
+            const checkedCount = tempPrefState.filter(u => u.checked).length;
+            const hint = document.getElementById('sourcePrefHint');
+            if (checkedCount === 0) {
+                hint.className = 'pref-hint';
+                hint.textContent = '⚠ 至少保留 1 个 URL，否则这个频道在 M3U 里不会出现。';
+            } else {
+                hint.className = 'pref-hint ok';
+                hint.textContent = '当前选中 ' + checkedCount + ' / ' + tempPrefState.length + ' 个来源。已选中的按此顺序进入 M3U。';
+            }
+            renderSourcePrefList();
+            document.getElementById('sourcePrefModal').classList.remove('hidden');
+        }
+
+        function getSourceNameForUrl(channel, url) {
+            // 简单方法：channel.sources 是所有来源名，无法按 URL 精确映射
+            // 这里显示所有来源，方便用户理解
+            if (channel.sources && channel.sources.length > 0) {
+                return channel.sources.map(s => s.sourceName).join(', ');
+            }
+            return '未知来源';
+        }
+
+        function renderSourcePrefList() {
+            const container = document.getElementById('sourcePrefList');
+            container.innerHTML = tempPrefState.map((item, i) => \`
+                <div class="source-pref-item" data-idx="\${i}">
+                    <input type="checkbox" \${item.checked ? 'checked' : ''} 
+                           onchange="tempPrefState[\${i}].checked = this.checked; updatePrefHint()">
+                    <span class="src-tag">\${escapeHtml(item.sourceName)}</span>
+                    <span class="url-text">\${escapeHtml(item.url)}</span>
+                    <button class="up" onclick="movePref(\${i}, -1)" \${i === 0 ? 'disabled' : ''}>↑</button>
+                    <button class="down" onclick="movePref(\${i}, 1)" \${i === tempPrefState.length - 1 ? 'disabled' : ''}>↓</button>
+                </div>
+            \`).join('');
+        }
+
+        function movePref(idx, dir) {
+            const newIdx = idx + dir;
+            if (newIdx < 0 || newIdx >= tempPrefState.length) return;
+            const item = tempPrefState.splice(idx, 1)[0];
+            tempPrefState.splice(newIdx, 0, item);
+            renderSourcePrefList();
+        }
+
+        function updatePrefHint() {
+            const checkedCount = tempPrefState.filter(u => u.checked).length;
+            const hint = document.getElementById('sourcePrefHint');
+            if (checkedCount === 0) {
+                hint.className = 'pref-hint';
+                hint.textContent = '⚠ 至少保留 1 个 URL，否则这个频道在 M3U 里不会出现。';
+            } else {
+                hint.className = 'pref-hint ok';
+                hint.textContent = '当前选中 ' + checkedCount + ' / ' + tempPrefState.length + ' 个来源。已选中的按此顺序进入 M3U。';
+            }
+        }
+
+        function closeSourcePrefModal() {
+            document.getElementById('sourcePrefModal').classList.add('hidden');
+            currentPrefChannelKey = null;
+            tempPrefState = null;
+        }
+
+        async function saveSourcePref() {
+            if (!currentPrefChannelKey || !tempPrefState) return;
+            const checkedUrls = tempPrefState.filter(u => u.checked).map(u => u.url);
+            if (checkedUrls.length === 0) {
+                alert('请至少勾选 1 个来源 URL');
+                return;
+            }
+            // 更新本地
+            channelPrefs[currentPrefChannelKey] = { urls: checkedUrls };
+            // 发送到后端
+            try {
+                const res = await fetch('/api/channel-prefs', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(channelPrefs)
+                });
+                const data = await res.json();
+                if (!data.success) throw new Error(data.error || '保存失败');
+                closeSourcePrefModal();
+                // 更新 UI
+                document.getElementById('prefCount').textContent = Object.keys(channelPrefs).length;
+                renderChannels();
+            } catch (err) {
+                alert('保存失败: ' + err.message);
+            }
+        }
+
+        async function clearCurrentChannelPref() {
+            if (!currentPrefChannelKey) return;
+            if (!confirm('确认清除这个频道的来源偏好？下次刷新将使用默认行为。')) return;
+            delete channelPrefs[currentPrefChannelKey];
+            try {
+                await fetch('/api/channel-prefs', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(channelPrefs)
+                });
+                closeSourcePrefModal();
+                document.getElementById('prefCount').textContent = Object.keys(channelPrefs).length;
+                renderChannels();
+            } catch (err) {
+                alert('清除失败: ' + err.message);
+            }
+        }
+
+        async function resetAllPrefs() {
+            if (Object.keys(channelPrefs).length === 0) { alert('当前没有任何偏好'); return; }
+            if (!confirm('确认清除所有频道的来源偏好？此操作不可撤销。')) return;
+            channelPrefs = {};
+            try {
+                await fetch('/api/channel-prefs', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(channelPrefs)
+                });
+                document.getElementById('prefCount').textContent = '0';
+                renderChannels();
+            } catch (err) {
+                alert('重置失败: ' + err.message);
+            }
         }
         
         function filterByCategory(cat) {
