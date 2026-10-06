@@ -1,6 +1,6 @@
 // 配置
 const CONFIG = {
-    VERSION: '20260918-kvfix',
+    VERSION: '20261006-block',
     GROUP_NAME: '梦回唐朝',
     PROTECTED_PLAYLISTS: ['1'],
     FETCH_TIMEOUT_MS: 15000,
@@ -8,7 +8,16 @@ const CONFIG = {
     URL_REPLACEMENTS: [
         { from: 'p.mhtc.top', to: '192.168.100.1' }
     ],
-    DEFAULT_SOURCES: []
+    DEFAULT_SOURCES: [],
+    // 屏蔽分类：group 名匹配这些前缀/关键字的频道不进入 M3U 输出
+    // 主要屏蔽咪咕体育赛事日程表（每天刷新的"体育-今天/明天/昨天"）
+    BLOCKED_GROUP_PATTERNS: [
+        '体育-今天',
+        '体育-明天',
+        '体育-昨天',
+        '赛事回放',
+        '赛事直播'
+    ]
 };
 
 // 内存缓存（初始化时包含示例数据）
@@ -305,7 +314,18 @@ async function genM3U(channels, baseUrl) {
     }
 
     // 基于传入的 channels 做合并 + 应用用户偏好
-    const groups = buildMergedChannels(channels);
+    let groups = buildMergedChannels(channels);
+
+    // 屏蔽分类过滤：默认去掉 group 匹配 CONFIG.BLOCKED_GROUP_PATTERNS 的频道
+    if (CONFIG.BLOCKED_GROUP_PATTERNS && CONFIG.BLOCKED_GROUP_PATTERNS.length > 0) {
+        groups = groups.filter(g => {
+            const blocked = CONFIG.BLOCKED_GROUP_PATTERNS.some(p =>
+                (g.group || '').includes(p) || (g.name || '').includes(p)
+            );
+            return !blocked;
+        });
+    }
+
     const prefs = await loadChannelPrefs();
     applyChannelPreferences(groups, prefs);
 
