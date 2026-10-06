@@ -1355,16 +1355,24 @@ async function handleRequest(request) {
     // API - 获取播放列表列表
     if (path === '/api/playlists') {
         const playlists = await getPlaylists();
-        const list = Object.keys(playlists).map(id => ({
-            id: id,
-            name: playlists[id].name,
-            protected: isProtectedPlaylist(id, playlists[id]),
-            channelCount: playlists[id].channelCount,
-            refreshTimes: playlists[id].refreshTimes || ['05:05', '17:05'],
-            url: `/playlist/${id}.m3u`,
-            createdAt: playlists[id].createdAt,
-            updatedAt: playlists[id].updatedAt
-        }));
+        const validUrlSet = new Set(cacheData.channels.map(c => c.url));
+        const list = Object.keys(playlists).map(id => {
+            const pl = playlists[id];
+            const invalidUrls = pl.urls.filter(u => !validUrlSet.has(u));
+            const validCount = pl.urls.length - invalidUrls.length;
+            return {
+                id: id,
+                name: pl.name,
+                protected: isProtectedPlaylist(id, pl),
+                channelCount: pl.channelCount,
+                validCount: validCount,
+                invalidCount: invalidUrls.length,
+                refreshTimes: pl.refreshTimes || ['05:05', '17:05'],
+                url: `/playlist/${id}.m3u`,
+                createdAt: pl.createdAt,
+                updatedAt: pl.updatedAt
+            };
+        });
         return new Response(JSON.stringify({ playlists: list }, null, 2), {
             headers: { 'Content-Type': 'application/json; charset=utf-8' }
         });
@@ -1911,6 +1919,8 @@ const FRONTEND_HTML = `
         .channel-name { font-weight: 500; color: #1f2937; text-align: left; }
         .source-badge { display: inline-block; font-size: 10px; background: #3b82f6; color: white; padding: 1px 6px; border-radius: 8px; margin-left: 6px; vertical-align: middle; }
         .fixed-badge { display: inline-block; font-size: 10px; background: #92400e; color: #fef3c7; padding: 2px 8px; border-radius: 8px; margin-left: 6px; vertical-align: middle; }
+        .valid-badge { display: inline-block; font-size: 10px; background: #dcfce7; color: #166534; padding: 2px 8px; border-radius: 8px; margin-left: 4px; vertical-align: middle; border: 1px solid #86efac; }
+        .invalid-badge { display: inline-block; font-size: 10px; background: #fee2e2; color: #991b1b; padding: 2px 8px; border-radius: 8px; margin-left: 4px; vertical-align: middle; border: 1px solid #fca5a5; font-weight: 600; }
         .channel-group { font-size: 12px; color: #6b7280; }
         .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; justify-content: center; align-items: center; z-index: 1000; }
         .modal { background: white; border-radius: 8px; padding: 24px; width: 90%; max-width: 900px; max-height: 90vh; overflow-y: auto; }
@@ -2895,8 +2905,8 @@ const FRONTEND_HTML = `
             }
             table.innerHTML = data.playlists.map(pl => \`
                 <tr>
-                    <td>\${escapeHtml(pl.name)}\${pl.protected ? '<span class="fixed-badge">固定</span>' : ''}</td>
-                    <td>\${pl.channelCount}</td>
+                    <td>\${escapeHtml(pl.name)}\${pl.protected ? '<span class="fixed-badge">固定</span>' : ''}\${pl.invalidCount > 0 ? '<span class="invalid-badge">⚠️ ' + pl.invalidCount + ' 失效</span>' : '<span class="valid-badge">✓ ' + pl.validCount + ' 干净</span>'}</td>
+                    <td>\${pl.validCount}/${pl.channelCount}</td>
                     <td>\${pl.refreshTimes && pl.refreshTimes.length > 0 ? pl.refreshTimes.join(', ') : '05:05, 17:05'}</td>
                     <td>\${new Date(pl.createdAt).toLocaleString()}</td>
                     <td>\${pl.updatedAt ? new Date(pl.updatedAt).toLocaleString() : '-'}</td>
