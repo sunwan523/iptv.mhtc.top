@@ -364,13 +364,16 @@ function buildMergedChannels(channels) {
                 tvgName: ch.tvgName || '',
                 urlCount: 0,
                 urls: [],
-                sourcesMap: new Map() // sourceId -> sourceName
+                urlSources: new Map(), // url -> sourceName
+                sourcesMap: new Map()  // sourceId -> sourceName
             });
         }
         const g = grouped.get(key);
         g.urls.push(ch.url);
         g.urlCount++;
-        // 收集来源信息
+        // 精确记录：每个 URL 来自哪个 source
+        if (ch.sourceName) g.urlSources.set(ch.url, ch.sourceName);
+        // 收集来源信息（聚合用）
         if (ch.sources && ch.sources.length > 0) {
             for (const s of ch.sources) {
                 g.sourcesMap.set(s.sourceId, s.sourceName);
@@ -379,11 +382,14 @@ function buildMergedChannels(channels) {
             g.sourcesMap.set(ch.sourceId, ch.sourceName);
         }
     }
-    // 把 sourcesMap 转成数组，方便前端消费
+    // 把 sourcesMap 转成数组，urlSources 也转成对象方便 JSON 序列化
     return Array.from(grouped.values()).map(g => {
         const sources = Array.from(g.sourcesMap.entries()).map(([id, name]) => ({ sourceId: id, sourceName: name }));
+        const urlSources = Object.fromEntries(g.urlSources.entries());
         delete g.sourcesMap;
+        delete g.urlSources;
         g.sources = sources;
+        g.urlSources = urlSources;
         return g;
     });
 }
@@ -1340,12 +1346,18 @@ async function handleRequest(request) {
             });
         }
         const channels = cacheData.channels.filter(ch => pl.urls.includes(ch.url));
+        // 失效 URL：保存的 urls 里不在当前 cacheData.channels 的
+        const validUrlSet = new Set(cacheData.channels.map(c => c.url));
+        const invalidUrls = pl.urls.filter(u => !validUrlSet.has(u));
         return new Response(JSON.stringify({
             id: plId,
             name: pl.name,
             urls: pl.urls,
+            invalidUrls: invalidUrls,
             channels: channels,
             channelCount: pl.channelCount,
+            validCount: channels.length,
+            invalidCount: invalidUrls.length,
             url: `/playlist/${plId}.m3u`,
             createdAt: pl.createdAt
         }, null, 2), {
@@ -1885,6 +1897,12 @@ const FRONTEND_HTML = `
         .btn-add { background: #10b981; color: white; padding: 4px 8px; border: none; border-radius: 4px; cursor: pointer; }
         .btn-remove { background: #ef4444; color: white; padding: 4px 8px; border: none; border-radius: 4px; cursor: pointer; }
         .btn-sm { padding: 4px 10px; font-size: 12px; }
+        /* 失效 URL 警告 */
+        #invalidUrlsBox { margin: 12px 0; padding: 12px; background: #fef2f2; border: 1px solid #fecaca; border-radius: 6px; max-height: 200px; overflow-y: auto; }
+        .invalid-warn { color: #dc2626; font-weight: 600; margin-bottom: 8px; font-size: 13px; }
+        .invalid-list { display: flex; flex-direction: column; gap: 4px; }
+        .invalid-item { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+        .invalid-url { color: #991b1b; font-family: monospace; word-break: break-all; }
         .name-input { width: 120px; padding: 3px 6px; border: 1px solid #d1d5db; border-radius: 3px; font-size: 13px; }
         /* === 频道来源偏好 新样式 === */
         .source-filter-bar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; padding: 10px; background: #f9fafb; border-radius: 6px; align-items: center; }
@@ -2142,6 +2160,9 @@ const FRONTEND_HTML = `
                 <div class="playlist-url" id="editPlaylistUrl"></div>
             </div>
             
+            <!-- 失效 URL 警告 -->
+            <div id="invalidUrlsBox" style="display:none"></div>
+            
             <div class="playlist-editor">
                 <div class="available">
                     <h3>可用频道</h3>
@@ -2207,7 +2228,8 @@ const FRONTEND_HTML = `
         let playlistEditor = {
             available: [],
             selected: [],
-            selectedUrls: new Set()
+            selectedUrls: new Set(),
+            invalidUrls: [] // 保存的 URL 里已经失效的
         };
         
         document.querySelectorAll('.sidebar a').forEach(link => {
@@ -2531,12 +2553,15 @@ const FRONTEND_HTML = `
         }
 
         function getSourceNameForUrl(channel, url) {
-            // 简单方法：channel.sources 是所有来源名，无法按 URL 精确映射
-            // 这里显示所有来源，方便用户理解
-            if (channel.sources && channel.sources.length > 0) {
-                return channel.sources.map(s => s.sourceName).join(', ');
+            // 精确映射：后端 buildMergedChannels 现在返回 urlSources: { url: sourceName }
+            if (channel.urlSources && channel.urlSources[url]) {
+                return channel.urlSources[url];
             }
-            return '未知来源';
+            // 回落：旧数据没有 urlSources 时，从 sources 聚合里猜
+            if (channel.sources && channel.sources.length === 1) {
+                return channel.sources[0].sourceName;
+            }
+            return channel.sources ? channel.sources.map(s => s.sourceName).join(', ') : '未知来源';
         }
 
         function renderSourcePrefList() {
@@ -2889,6 +2914,7 @@ const FRONTEND_HTML = `
             
             playlistEditor.selectedUrls = new Set(data.urls);
             playlistEditor.selected = data.channels || [];
+            playlistEditor.invalidUrls = data.invalidUrls || [];
             
             const allRes = await fetch('/api/channels');
             const allData = await allRes.json();
@@ -2908,6 +2934,27 @@ const FRONTEND_HTML = `
             const filteredSelected = playlistEditor.selected.filter(ch => 
                 ch.name.toLowerCase().includes(selectedSearch)
             );
+            
+            // 警告条：有失效 URL 时显示
+            const invalidBox = document.getElementById('invalidUrlsBox');
+            if (playlistEditor.invalidUrls.length > 0) {
+                const filteredInvalid = playlistEditor.invalidUrls.filter(u =>
+                    !selectedSearch || u.toLowerCase().includes(selectedSearch)
+                );
+                invalidBox.style.display = 'block';
+                invalidBox.innerHTML = \`
+                    <div class="invalid-warn">\
+⚠️ 检测到 \${playlistEditor.invalidUrls.length} 个失效频道（数据源已删除或 URL 变更），建议移除：\</div>
+                    <div class="invalid-list">\${
+                        filteredInvalid.map(u => \`<div class="invalid-item">
+                            <button class="btn btn-danger btn-sm" onclick="removeInvalidUrl('\${jsArg(u)}')">移除</button>
+                            <span class="invalid-url">\${escapeHtml(u)}</span>
+                        </div>\`).join('')
+                    }</div>
+                \`;
+            } else {
+                invalidBox.style.display = 'none';
+            }
             
             document.getElementById('availableChannels').innerHTML = filteredAvailable.map(ch => \`
                 <div class="channel-item">
@@ -2930,6 +2977,13 @@ const FRONTEND_HTML = `
                     </div>
                 </div>
             \`).join('');
+        }
+        
+        function removeInvalidUrl(url) {
+            const decoded = decodeURIComponent(url);
+            playlistEditor.invalidUrls = playlistEditor.invalidUrls.filter(u => u !== decoded);
+            playlistEditor.selectedUrls.delete(decoded);
+            renderPlaylistEditor();
         }
         
         function filterAvailableChannels() {
