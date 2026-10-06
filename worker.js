@@ -313,19 +313,8 @@ async function genM3U(channels, baseUrl) {
         return url;
     }
 
-    // 基于传入的 channels 做合并 + 应用用户偏好
-    let groups = buildMergedChannels(channels);
-
-    // 屏蔽分类过滤：默认去掉 group 匹配 CONFIG.BLOCKED_GROUP_PATTERNS 的频道
-    if (CONFIG.BLOCKED_GROUP_PATTERNS && CONFIG.BLOCKED_GROUP_PATTERNS.length > 0) {
-        groups = groups.filter(g => {
-            const blocked = CONFIG.BLOCKED_GROUP_PATTERNS.some(p =>
-                (g.group || '').includes(p) || (g.name || '').includes(p)
-            );
-            return !blocked;
-        });
-    }
-
+    // 基于传入的 channels 做合并 + 屏蔽过滤 + 应用用户偏好
+    const groups = filterBlockedGroups(buildMergedChannels(channels));
     const prefs = await loadChannelPrefs();
     applyChannelPreferences(groups, prefs);
 
@@ -418,6 +407,20 @@ async function saveChannelPrefs(prefs) {
 }
 
 // 应用偏好到频道组：过滤掉没选的 URL，按偏好排序
+// 屏蔽分类过滤：g.group 或 g.name 匹配 CONFIG.BLOCKED_GROUP_PATTERNS 的整组丢弃
+function filterBlockedGroups(groups) {
+    if (!CONFIG.BLOCKED_GROUP_PATTERNS || CONFIG.BLOCKED_GROUP_PATTERNS.length === 0) return groups;
+    return groups.filter(g => !CONFIG.BLOCKED_GROUP_PATTERNS.some(p =>
+        (g.group || '').includes(p) || (g.name || '').includes(p)
+    ));
+}
+
+// 对分类名数组做同样的屏蔽过滤
+function filterBlockedCategories(cats) {
+    if (!CONFIG.BLOCKED_GROUP_PATTERNS || CONFIG.BLOCKED_GROUP_PATTERNS.length === 0) return cats;
+    return cats.filter(c => !CONFIG.BLOCKED_GROUP_PATTERNS.some(p => (c || '').includes(p)));
+}
+
 // prefs: { channelKey: { urls: [...], updatedAt } }
 // groups: buildMergedChannels() 的输出 [{ key, urls, sources, ... }]
 // 返回修改后的 groups
@@ -1012,8 +1015,8 @@ async function handleRequest(request) {
         const sources = await getSources();
         return new Response(JSON.stringify({
             version: CONFIG.VERSION,
-            totalChannels: cacheData.channels.length,
-            totalCategories: cacheData.categories.length,
+            totalChannels: filterBlockedGroups(cacheData.channels).length,
+            totalCategories: filterBlockedCategories(cacheData.categories).length,
             lastUpdated: cacheData.lastUpdated,
             sourceCount: sources.length,
             enabledSources: sources.filter(s => s.enabled).length,
@@ -1026,15 +1029,16 @@ async function handleRequest(request) {
 
     // API - 获取频道
     if (path === '/api/channels') {
-        const filtered = filterChannels(cacheData.channels, {
+        const allFiltered = filterBlockedGroups(cacheData.channels);
+        const filtered = filterChannels(allFiltered, {
             group: query.get('group'),
             search: query.get('search')
         });
         return new Response(JSON.stringify({
-            total: cacheData.channels.length,
+            total: allFiltered.length,
             filtered: filtered.length,
             channels: filtered,
-            categories: cacheData.categories,
+            categories: filterBlockedCategories(cacheData.categories),
             lastUpdated: cacheData.lastUpdated
         }, null, 2), {
             headers: { 'Content-Type': 'application/json; charset=utf-8' }
@@ -1043,7 +1047,7 @@ async function handleRequest(request) {
 
     // API - 获取合并后的频道组（前端展示用）
     if (path === '/api/merged-channels') {
-        const merged = buildMergedChannels();
+        const merged = filterBlockedGroups(buildMergedChannels());
         // 加载并应用用户偏好（过滤+排序）
         const prefs = await loadChannelPrefs();
         const withPrefs = applyChannelPreferences(merged, prefs);
@@ -1061,7 +1065,7 @@ async function handleRequest(request) {
             total: merged.length,
             filtered: result.length,
             channels: result,
-            categories: cacheData.categories,
+            categories: filterBlockedCategories(cacheData.categories),
             lastUpdated: cacheData.lastUpdated
         }, null, 2), {
             headers: { 'Content-Type': 'application/json; charset=utf-8' }
@@ -1101,7 +1105,7 @@ async function handleRequest(request) {
     // API - 获取分类
     if (path === '/api/categories') {
         return new Response(JSON.stringify({
-            categories: cacheData.categories,
+            categories: filterBlockedCategories(cacheData.categories),
             lastUpdated: cacheData.lastUpdated
         }, null, 2), {
             headers: { 'Content-Type': 'application/json; charset=utf-8' }
