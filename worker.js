@@ -716,10 +716,15 @@ function isUnsafeHostname(hostname) {
     return false;
 }
 
+// 本地运行模式（Docker/Node）允许访问私网地址，仅 Cloudflare Worker（CF_RUNTIME）严格禁止
+const ALLOW_PRIVATE_NETWORK = typeof CF_RUNTIME === 'undefined';
+
 function isSafeSourceUrl(urlStr) {
     try {
         const u = new URL(urlStr);
         if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+        // 本地 Docker 模式下允许私网访问（爱快/同网段机器）
+        if (ALLOW_PRIVATE_NETWORK) return true;
         return !isUnsafeHostname(u.hostname);
     } catch {
         return false;
