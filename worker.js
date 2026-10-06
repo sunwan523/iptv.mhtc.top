@@ -2262,7 +2262,7 @@ const FRONTEND_HTML = `
             }
             const sorted = Array.from(srcSet).sort();
             const tagHtml = sorted.map(name => \`
-                <span class="source-tag" data-src="\${jsArg(name)}" 
+                <span class="source-tag" data-src="\${escapeHtml(name)}" 
                       onclick="toggleSourceFilter(this)">
                     \${escapeHtml(name)}<span class="count"></span>
                 </span>
