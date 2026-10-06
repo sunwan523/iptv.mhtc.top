@@ -208,35 +208,44 @@ function getChannelKey(name) {
     if (!name) return '';
     var lower = name.toLowerCase();
 
-    // 提取基础标识（字母数字+加号，如 cctv5、cctv5+）
-    var baseMatch = lower.match(/[a-z]+[0-9]+\+?/);
-    var base = baseMatch ? baseMatch[0] : '';
+    // 1. 去掉括号里的内容（如 (高清)、【高清】、(亚)）
+    lower = lower.replace(/[()（）【】\[\]{}「」『』〔〕][^)）】\]{}」』〕]+[)）】\]{}」』〕]/g, '');
 
-    // 没有字母数字前缀时，用全名去标点+去后缀比较
-    if (!base) {
-        var cleaned = lower.replace(/[\s\-_\.:：,，、()（）【】\[\]{}「」"「」\+]+/g, '');
-        cleaned = cleaned.replace(/(hd|高清|标清|超清|4k|8k|版)$/i, '');
-        return cleaned;
+    // 2. 去掉尾部修饰词（高清/HD/标清/4K/版 等）
+    lower = lower.replace(/\s*(超高清|超清|蓝光|4k|8k|fhd|hd|标清|高清|版|频道|台)$/g, '');
+
+    // 3. 提取 base 标识：允许字母和数字之间有 - 或空格
+    // 如 cctv-1、cctv 1、cctv1、cctv-5+、sdtv-3
+    var baseMatch = lower.match(/[a-z]+[-\s]?[0-9]+\+?/);
+    if (baseMatch) {
+        // 标准化：去掉 base 里的连字符和空格，统一格式
+        var base = baseMatch[0].replace(/[-\s]/g, '');
+
+        // 提取中文描述部分（用于判断子频道）
+        var desc = lower.replace(/[a-z0-9\+\s\-_\.:：,，、()（）【】\[\]{}「」"「」]+/g, '');
+
+        // 子频道关键词 → 独立 key（CCTV-4 欧洲 ≠ CCTV-4）
+        var subChannelKeywords = [
+            '欧洲', '美洲', '非洲', '亚太', '东南亚', '南亚', '中东',
+            '阿拉伯', '西班牙', '法国', '俄国', '俄罗斯',
+            '英语', '外语', '奥林匹克'
+        ];
+        var isSubChannel = subChannelKeywords.some(function (kw) {
+            return desc.indexOf(kw) !== -1;
+        });
+
+        if (isSubChannel) {
+            return base + '_' + desc;
+        } else {
+            // 主频道：直接返回 base，忽略"综合/体育/新闻频道"等描述
+            return base;
+        }
     }
 
-    // 提取中文描述部分
-    var desc = lower.replace(/[a-z0-9\+\s\-_\.:：,，、()（）【】\[\]{}「」"「」]+/g, '');
-
-    // 子频道关键词（包含这些词的是独立子频道，不与主频道合并）
-    var subChannelKeywords = [
-        '欧洲', '美洲', '非洲', '亚太', '东南亚', '南亚', '中东',
-        '阿拉伯', '西班牙', '法国', '俄国', '俄罗斯',
-        '英语', '外语'
-    ];
-    var isSubChannel = subChannelKeywords.some(function (kw) {
-        return desc.indexOf(kw) !== -1;
-    });
-
-    if (isSubChannel) {
-        return base + '_' + desc;
-    } else {
-        return base;
-    }
+    // 4. 没有字母数字前缀（"湖南卫视"、"珠江新闻眼"）→ 用中文 clean
+    var cleaned = lower.replace(/[\s\-_\.:：,，、()（）【】\[\]{}「」"「」\+]+/g, '');
+    cleaned = cleaned.replace(/(超高清|超清|蓝光|4k|8k|fhd|高清|标清|hd|版|频道|卫视|台)$/i, '');
+    return cleaned;
 }
 
 // 合并去重（支持优先级 + 合并多来源信息）
