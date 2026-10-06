@@ -289,6 +289,7 @@ function escapeM3UName(value) {
 }
 
 // 生成 M3U（同名频道合并多个源，按优先级排序，可应用用户偏好）
+// channels: 传入要输出的频道数组（可以是筛选后的）
 // baseUrl 可选，指定后会将有固定映射的频道地址转为跳转链接
 async function genM3U(channels, baseUrl) {
     // 预加载所有固定映射 ID，用于将实地址转为跳转地址
@@ -303,8 +304,8 @@ async function genM3U(channels, baseUrl) {
         return url;
     }
 
-    // 用 buildMergedChannels 合并 + applyChannelPreferences 应用用户偏好
-    const groups = buildMergedChannels();
+    // 基于传入的 channels 做合并 + 应用用户偏好
+    const groups = buildMergedChannels(channels);
     const prefs = await loadChannelPrefs();
     applyChannelPreferences(groups, prefs);
 
@@ -317,7 +318,7 @@ async function genM3U(channels, baseUrl) {
         m3u += ` group-title="${escapeM3UAttr(CONFIG.GROUP_NAME)}"`;
         m3u += ',' + escapeM3UName(g.name) + '\n';
         for (const url of g.urls) {
-            m3u += url + '\n';
+            m3u += toOutputUrl(url) + '\n';
         }
     }
     return m3u;
@@ -338,9 +339,11 @@ function filterChannels(channels, query) {
 }
 
 // 构建合并后的频道组列表（前端展示用）
-function buildMergedChannels() {
+// channels 可选，默认用 cacheData.channels
+function buildMergedChannels(channels) {
+    channels = channels || cacheData.channels;
     const grouped = new Map();
-    for (const ch of cacheData.channels) {
+    for (const ch of channels) {
         const key = getChannelKey(ch.name);
         if (!grouped.has(key)) {
             grouped.set(key, {
