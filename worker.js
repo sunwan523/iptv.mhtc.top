@@ -348,6 +348,27 @@ function filterChannels(channels, query) {
 }
 
 // 构建合并后的频道组列表（前端展示用）
+// logo/tvgId/tvgName 选择优先级：哪个源给的元数据质量最好
+// 返回一个"分数"，分数越高越优先选用
+function scoreTvgLogo(logo) {
+    if (!logo) return 0;
+    // 源自带的高质量 logo
+    if (logo.includes('garysclub.sharewithyou.dpdns.org')) return 100;
+    // 官方 epg.112114.xyz 兜底 logo
+    if (logo.includes('epg.112114.xyz')) return 50;
+    // 运营商/其他来源 logo
+    return 30;
+}
+function scoreTvgId(id) {
+    if (!id) return 0;
+    // 纯小写字母数字（规范格式，如 cctv1）
+    if (/^[a-z0-9_]+$/.test(id)) return 100;
+    // 含大写（如 CCTV1）
+    if (/^[A-Za-z0-9_]+$/.test(id)) return 70;
+    // 含中文（如 湖南卫视）
+    return 40;
+}
+
 // channels 可选，默认用 cacheData.channels
 function buildMergedChannels(channels) {
     channels = channels || cacheData.channels;
@@ -364,30 +385,33 @@ function buildMergedChannels(channels) {
                 tvgName: ch.tvgName || '',
                 urlCount: 0,
                 urls: [],
-                urlSources: new Map(), // url -> sourceName
-                sourcesMap: new Map()  // sourceId -> sourceName
+                urlSources: new Map(),
+                sourcesMap: new Map(),
+                _tvgIdScore: scoreTvgId(ch.tvgId),
+                _tvgLogoScore: scoreTvgLogo(ch.tvgLogo)
             });
         }
         const g = grouped.get(key);
         g.urls.push(ch.url);
         g.urlCount++;
-        // 精确记录：每个 URL 来自哪个 source
         if (ch.sourceName) g.urlSources.set(ch.url, ch.sourceName);
-        // 收集来源信息（聚合用）
         if (ch.sources && ch.sources.length > 0) {
-            for (const s of ch.sources) {
-                g.sourcesMap.set(s.sourceId, s.sourceName);
-            }
+            for (const s of ch.sources) g.sourcesMap.set(s.sourceId, s.sourceName);
         } else if (ch.sourceId) {
             g.sourcesMap.set(ch.sourceId, ch.sourceName);
         }
+        // 用更好的元数据覆盖
+        const newIdScore = scoreTvgId(ch.tvgId);
+        const newLogoScore = scoreTvgLogo(ch.tvgLogo);
+        if (newIdScore > g._tvgIdScore) { g.tvgId = ch.tvgId; g._tvgIdScore = newIdScore; }
+        if (newLogoScore > g._tvgLogoScore) { g.tvgLogo = ch.tvgLogo; g._tvgLogoScore = newLogoScore; }
+        // tvgName 只要有的就保留（取第一个非空的）
+        if (!g.tvgName && ch.tvgName) g.tvgName = ch.tvgName;
     }
-    // 把 sourcesMap 转成数组，urlSources 也转成对象方便 JSON 序列化
     return Array.from(grouped.values()).map(g => {
         const sources = Array.from(g.sourcesMap.entries()).map(([id, name]) => ({ sourceId: id, sourceName: name }));
         const urlSources = Object.fromEntries(g.urlSources.entries());
-        delete g.sourcesMap;
-        delete g.urlSources;
+        delete g.sourcesMap; delete g.urlSources; delete g._tvgIdScore; delete g._tvgLogoScore;
         g.sources = sources;
         g.urlSources = urlSources;
         return g;
