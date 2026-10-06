@@ -2905,8 +2905,8 @@ const FRONTEND_HTML = `
             }
             table.innerHTML = data.playlists.map(pl => \`
                 <tr>
-                    <td>\${escapeHtml(pl.name)}\${pl.protected ? '<span class="fixed-badge">固定</span>' : ''}\${pl.invalidCount > 0 ? '<span class="invalid-badge">⚠️ ' + pl.invalidCount + ' 失效</span>' : '<span class="valid-badge">✓ ' + pl.validCount + ' 干净</span>'}</td>
-                    <td>\${pl.validCount}/${pl.channelCount}</td>
+                    <td>\${escapeHtml(pl.name)}\${pl.protected ? '<span class="fixed-badge">固定</span>' : ''}\${pl.invalidCount > 0 ? '<span class="invalid-badge">INV:' + pl.invalidCount + '</span>' : '<span class="valid-badge">OK:' + pl.validCount + '</span>'}</td>
+                    <td>\${pl.validCount}/\${pl.channelCount}</td>
                     <td>\${pl.refreshTimes && pl.refreshTimes.length > 0 ? pl.refreshTimes.join(', ') : '05:05, 17:05'}</td>
                     <td>\${new Date(pl.createdAt).toLocaleString()}</td>
                     <td>\${pl.updatedAt ? new Date(pl.updatedAt).toLocaleString() : '-'}</td>
