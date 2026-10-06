@@ -17,6 +17,13 @@ const CONFIG = {
         '体育-昨天',
         '赛事回放',
         '赛事直播'
+    ],
+    // EPG 节目预告 XML 源（genM3U 输出时写入 url-tvg="..." 头部，播放器自动匹配）
+    // 参考 https://epg.112114.xyz 等公开 EPG 项目
+    EPG_URLS: [
+        'https://live.fanmingming.com/e.xml',
+        'https://epg.112114.xyz/pp.xml.gz',
+        'https://epg.112114.xyz/pp.xml'
     ]
 };
 
@@ -318,7 +325,12 @@ async function genM3U(channels, baseUrl) {
     const prefs = await loadChannelPrefs();
     applyChannelPreferences(groups, prefs);
 
-    let m3u = '#EXTM3U\n';
+    let m3u = '#EXTM3U';
+    // EPG 节目预告源：播放器读 url-tvg 自动匹配 tvgId → 节目表
+    if (CONFIG.EPG_URLS && CONFIG.EPG_URLS.length > 0) {
+        m3u += ' url-tvg="' + CONFIG.EPG_URLS.join(',') + '"';
+    }
+    m3u += '\n';
     for (const g of groups) {
         m3u += '#EXTINF:-1';
         if (g.tvgId) m3u += ` tvg-id="${escapeM3UAttr(g.tvgId)}"`;
