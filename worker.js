@@ -1,6 +1,6 @@
 // 配置
 const CONFIG = {
-    VERSION: '20260807-v9',
+    VERSION: '20260918-kvfix',
     GROUP_NAME: '梦回唐朝',
     PROTECTED_PLAYLISTS: ['1'],
     FETCH_TIMEOUT_MS: 15000,
@@ -18,6 +18,24 @@ let cacheData = {
     lastUpdated: null
 };
 
+// ===== KV 聚合 key 常量 =====
+const ALL_SOURCES_KEY = '_all_sources';
+const ALL_PLAYLISTS_KEY = '_all_playlists';
+const CHMAP_PREFIX = 'chmap:';
+
+// Worker isolate 内存缓存（减少同一 isolate 内的 KV 调用）
+const memCache = {
+    sources: null,         // 数组
+    sourcesTs: 0,
+    playlists: null,       // 对象
+    playlistsTs: 0,
+    TTL: 120 * 1000        // 120 秒
+};
+
+function isCacheFresh(ts) {
+    return (Date.now() - ts) < memCache.TTL;
+}
+
 // URL 替换函数
 function replaceUrl(url) {
     CONFIG.URL_REPLACEMENTS.forEach(replace => {
@@ -33,7 +51,6 @@ function extractChannelId(url) {
 }
 
 // ===== 频道固定映射管理（映射ID → 实际播放地址） =====
-const CHMAP_PREFIX = 'chmap:';
 
 async function getChannelMapping(channelId) {
     try {
@@ -330,15 +347,54 @@ function buildMergedChannels() {
 // ===== 数据源管理 =====
 async function getSources() {
     try {
+        // 1. 优先用内存缓存（同 isolate 内多个 cron / HTTP 请求复用）
+        if (memCache.sources && isCacheFresh(memCache.sourcesTs)) {
+            return [...memCache.sources];
+        }
+
         if (!SOURCES_KV) {
             console.warn('SOURCES_KV not available, using default sources');
             return CONFIG.DEFAULT_SOURCES.sort((a, b) => (a.priority || 99) - (b.priority || 99));
         }
+
+        // 2. 先查聚合 key（1 次 get，替代 list + N get）
+        const agg = await SOURCES_KV.get(ALL_SOURCES_KEY);
+        if (agg) {
+            let sources;
+            try {
+                sources = JSON.parse(agg);
+            } catch {
+                sources = null;
+            }
+            if (Array.isArray(sources)) {
+                // 修复 _fixed_mapping 优先级
+                let needFix = false;
+                for (const s of sources) {
+                    if (s.id === '_fixed_mapping' && s.priority !== 3) {
+                        s.priority = 3;
+                        needFix = true;
+                    }
+                }
+                if (needFix) {
+                    await SOURCES_KV.put(ALL_SOURCES_KEY, JSON.stringify(sources));
+                    // 也同步写单个 key 保持兼容
+                    for (const s of sources) {
+                        await SOURCES_KV.put(s.id, JSON.stringify(s));
+                    }
+                }
+                sources.sort((a, b) => (a.priority || 99) - (b.priority || 99));
+                memCache.sources = sources;
+                memCache.sourcesTs = Date.now();
+                return sources;
+            }
+        }
+
+        // 3. fallback：旧数据迁移（list + N get），仅在聚合 key 不存在时执行一次
+        console.log('[KV 迁移] 未找到聚合 key，使用 list 方式读取并重建...');
         const list = await SOURCES_KV.list();
         const sources = [];
         for (const key of list.keys) {
-            // 跳过频道映射的内部数据（以 chmap: 为前缀）
-            if (key.name.startsWith(CHMAP_PREFIX)) continue;
+            if (key.name.startsWith(CHMAP_PREFIX) || key.name.startsWith('_lastRef_') || key.name === ALL_SOURCES_KEY || key.name === ALL_PLAYLISTS_KEY) continue;
             try {
                 const data = await SOURCES_KV.get(key.name);
                 if (data) {
@@ -359,7 +415,13 @@ async function getSources() {
                 sources.push(src);
             }
         }
-        return sources.sort((a, b) => (a.priority || 99) - (b.priority || 99));
+        sources.sort((a, b) => (a.priority || 99) - (b.priority || 99));
+        // 写入聚合 key，后续不再 list
+        await SOURCES_KV.put(ALL_SOURCES_KEY, JSON.stringify(sources));
+        memCache.sources = sources;
+        memCache.sourcesTs = Date.now();
+        console.log('[KV 迁移] 已重建聚合 key，', sources.length, '个数据源');
+        return sources;
     } catch (err) {
         console.error('getSources error:', err.message || err);
         return CONFIG.DEFAULT_SOURCES.sort((a, b) => (a.priority || 99) - (b.priority || 99));
@@ -368,6 +430,11 @@ async function getSources() {
 
 async function getSource(id) {
     try {
+        // 先查聚合缓存
+        if (memCache.sources && isCacheFresh(memCache.sourcesTs)) {
+            const found = memCache.sources.find(s => s.id === id);
+            if (found) return found;
+        }
         const data = await SOURCES_KV.get(id);
         return data ? JSON.parse(data) : null;
     } catch {
@@ -375,12 +442,37 @@ async function getSource(id) {
     }
 }
 
+async function _invalidateSourcesCache() {
+    memCache.sources = null;
+    memCache.sourcesTs = 0;
+}
+
 async function saveSource(id, data) {
+    // 1. 写单个 key（保持向后兼容）
     await SOURCES_KV.put(id, JSON.stringify(data));
+    // 2. 更新聚合 key
+    const sources = await getSources();
+    const idx = sources.findIndex(s => s.id === id);
+    if (idx >= 0) {
+        sources[idx] = data;
+    } else {
+        sources.push(data);
+    }
+    sources.sort((a, b) => (a.priority || 99) - (b.priority || 99));
+    await SOURCES_KV.put(ALL_SOURCES_KEY, JSON.stringify(sources));
+    memCache.sources = sources;
+    memCache.sourcesTs = Date.now();
 }
 
 async function deleteSource(id) {
+    // 1. 删单个 key
     await SOURCES_KV.delete(id);
+    // 2. 更新聚合 key
+    const sources = await getSources();
+    const filtered = sources.filter(s => s.id !== id);
+    await SOURCES_KV.put(ALL_SOURCES_KEY, JSON.stringify(filtered));
+    memCache.sources = filtered;
+    memCache.sourcesTs = Date.now();
 }
 
 function generateSourceId(name) {
@@ -391,13 +483,38 @@ function generateSourceId(name) {
 // ===== 播放列表管理 =====
 async function getPlaylists() {
     try {
+        // 1. 优先用内存缓存
+        if (memCache.playlists && isCacheFresh(memCache.playlistsTs)) {
+            return { ...memCache.playlists };
+        }
+
         if (!PLAYLISTS_KV) {
             console.warn('PLAYLISTS_KV not available');
             return {};
         }
+
+        // 2. 先查聚合 key
+        const agg = await PLAYLISTS_KV.get(ALL_PLAYLISTS_KEY);
+        if (agg) {
+            let playlists;
+            try {
+                playlists = JSON.parse(agg);
+            } catch {
+                playlists = null;
+            }
+            if (playlists && typeof playlists === 'object') {
+                memCache.playlists = playlists;
+                memCache.playlistsTs = Date.now();
+                return { ...playlists };
+            }
+        }
+
+        // 3. fallback：旧数据迁移
+        console.log('[KV 迁移] playlists 未找到聚合 key，使用 list 方式读取并重建...');
         const list = await PLAYLISTS_KV.list();
         const playlists = {};
         for (const key of list.keys) {
+            if (key.name === ALL_PLAYLISTS_KEY) continue;
             try {
                 const data = await PLAYLISTS_KV.get(key.name);
                 if (data) {
@@ -407,7 +524,11 @@ async function getPlaylists() {
                 console.error('跳过无效的播放列表:', key.name, err.message || err);
             }
         }
-        return playlists;
+        await PLAYLISTS_KV.put(ALL_PLAYLISTS_KEY, JSON.stringify(playlists));
+        memCache.playlists = playlists;
+        memCache.playlistsTs = Date.now();
+        console.log('[KV 迁移] playlists 已重建聚合 key，', Object.keys(playlists).length, '个播放列表');
+        return { ...playlists };
     } catch (err) {
         console.error('getPlaylists error:', err.message || err);
         return {};
@@ -416,9 +537,11 @@ async function getPlaylists() {
 
 async function getPlaylist(id) {
     try {
-        if (!PLAYLISTS_KV) {
-            return null;
+        // 先查聚合缓存
+        if (memCache.playlists && isCacheFresh(memCache.playlistsTs)) {
+            if (memCache.playlists[id]) return memCache.playlists[id];
         }
+        if (!PLAYLISTS_KV) return null;
         const data = await PLAYLISTS_KV.get(id);
         return data ? JSON.parse(data) : null;
     } catch (err) {
@@ -433,7 +556,14 @@ async function savePlaylist(id, data) {
             console.error('PLAYLISTS_KV not available, cannot save playlist');
             throw new Error('播放列表存储不可用');
         }
+        // 1. 写单个 key（向后兼容）
         await PLAYLISTS_KV.put(id, JSON.stringify(data));
+        // 2. 更新聚合 key
+        const playlists = await getPlaylists();
+        playlists[id] = data;
+        await PLAYLISTS_KV.put(ALL_PLAYLISTS_KEY, JSON.stringify(playlists));
+        memCache.playlists = playlists;
+        memCache.playlistsTs = Date.now();
     } catch (err) {
         console.error('savePlaylist error:', err.message || err);
         throw err;
@@ -446,7 +576,14 @@ async function deletePlaylist(id) {
             console.error('PLAYLISTS_KV not available, cannot delete playlist');
             throw new Error('播放列表存储不可用');
         }
+        // 1. 删单个 key
         await PLAYLISTS_KV.delete(id);
+        // 2. 更新聚合 key
+        const playlists = await getPlaylists();
+        delete playlists[id];
+        await PLAYLISTS_KV.put(ALL_PLAYLISTS_KEY, JSON.stringify(playlists));
+        memCache.playlists = playlists;
+        memCache.playlistsTs = Date.now();
     } catch (err) {
         console.error('deletePlaylist error:', err.message || err);
         throw err;
