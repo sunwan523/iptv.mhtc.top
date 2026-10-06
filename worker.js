@@ -1093,6 +1093,17 @@ async function handleRequest(request) {
                     prefs[key].updatedAt = nowIso;
                 }
                 await saveChannelPrefs(prefs);
+                // 偏好变了 → 所有 playlist M3U 缓存失效，否则还返回旧内容
+                try {
+                    const playlists = await getPlaylists();
+                    for (const id of Object.keys(playlists)) {
+                        await invalidatePlaylistCache(url.origin, id);
+                    }
+                    // /all.m3u 也清（如果存在）
+                    try { await caches.default.delete(new Request(url.origin + '/all.m3u')); } catch {}
+                } catch (err) {
+                    console.warn('channel-prefs cache bust failed:', err.message || err);
+                }
                 return new Response(JSON.stringify({ success: true, count: Object.keys(prefs).length }), {
                     headers: { 'Content-Type': 'application/json; charset=utf-8' }
                 });
