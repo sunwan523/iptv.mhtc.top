@@ -1,6 +1,6 @@
 // 配置
 const CONFIG = {
-    VERSION: '20261006-block',
+    VERSION: '20261006-allfix',
     GROUP_NAME: '梦回唐朝',
     PROTECTED_PLAYLISTS: ['1'],
     FETCH_TIMEOUT_MS: 15000,
