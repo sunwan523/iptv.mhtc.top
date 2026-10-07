@@ -46,11 +46,57 @@ const memCache = {
     sourcesTs: 0,
     playlists: null,       // 对象
     playlistsTs: 0,
+    urlStatus: null,        // { url: { ok, latency, status, checkedAt, error } }
+    urlStatusTs: 0,
     TTL: 120 * 1000        // 120 秒
 };
 
 function isCacheFresh(ts) {
     return (Date.now() - ts) < memCache.TTL;
+}
+
+// ===== 连通性检测 =====
+// 判断当前是否 Node 环境（local-server.js）— Cloudflare Worker 有 subrequest 限制，不能批量检测
+function isNodeEnv() {
+    try { return typeof process !== 'undefined' && process.versions && process.versions.node; }
+    catch { return false; }
+}
+
+// 单个 URL 检测：GET + Range: bytes=0-0，5s 超时
+async function checkOneUrl(url) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    const start = Date.now();
+    try {
+        const resp = await fetch(url, {
+            method: 'GET',
+            headers: { 'Range': 'bytes=0-0' },
+            signal: controller.signal,
+            redirect: 'follow'
+        });
+        const latency = Date.now() - start;
+        return { ok: resp.status >= 200 && resp.status < 400, latency, status: resp.status };
+    } catch (err) {
+        return { ok: false, latency: Date.now() - start, status: 0, error: err.name === 'AbortError' ? 'timeout' : String(err.message || err) };
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+// 批量检测：分批并发（每批 20），避免瞬时几百个请求
+async function checkUrlsBatch(urls) {
+    const results = {};
+    const batchSize = 20;
+    for (let i = 0; i < urls.length; i += batchSize) {
+        const batch = urls.slice(i, i + batchSize);
+        const settled = await Promise.allSettled(batch.map(u => checkOneUrl(u).then(r => ({ url: u, ...r }))));
+        for (const s of settled) {
+            if (s.status === 'fulfilled') {
+                results[s.value.url] = { ok: s.value.ok, latency: s.value.latency, status: s.value.status, checkedAt: Date.now(), error: s.value.error };
+            }
+        }
+    }
+    return results;
 }
 
 // URL 替换函数
@@ -1736,6 +1782,52 @@ async function handleRequest(request) {
         }
     }
 
+    // API - 触发连通性检测（只在本地 Node 环境可用，Cloudflare Worker 有 subrequest 限制）
+    if (path === '/api/check-connectivity' && method === 'POST') {
+        if (!isNodeEnv()) {
+            return new Response(JSON.stringify({
+                success: false,
+                error: '连通性检测仅在本地 Docker 环境可用（Cloudflare Worker 有 50 subrequest 限制）'
+            }, null, 2), { status: 400, headers: { 'Content-Type': 'application/json; charset=utf-8' } });
+        }
+        try {
+            // 收集所有频道的唯一 URL（cacheData.channels + merged groups 的 urls，去重）
+            const allUrls = new Set();
+            for (const ch of cacheData.channels) allUrls.add(ch.url);
+            const groups = buildMergedChannels(cacheData.channels);
+            for (const g of groups) for (const u of g.urls) allUrls.add(u);
+            const urlList = [...allUrls];
+            const statuses = await checkUrlsBatch(urlList);
+            memCache.urlStatus = statuses;
+            memCache.urlStatusTs = Date.now();
+            const ok = Object.values(statuses).filter(s => s.ok).length;
+            return new Response(JSON.stringify({
+                success: true,
+                total: urlList.length,
+                ok: ok,
+                fail: urlList.length - ok,
+                statuses: statuses
+            }, null, 2), { headers: { 'Content-Type': 'application/json; charset=utf-8' } });
+        } catch (err) {
+            return new Response(JSON.stringify({ success: false, error: err.message }, null, 2), {
+                status: 500, headers: { 'Content-Type': 'application/json; charset=utf-8' }
+            });
+        }
+    }
+
+    // API - 获取已缓存的连通性检测结果
+    if (path === '/api/connectivity') {
+        const statuses = memCache.urlStatus && isCacheFresh(memCache.urlStatusTs)
+            ? memCache.urlStatus : {};
+        return new Response(JSON.stringify({
+            nodeEnv: isNodeEnv(),
+            cached: !!memCache.urlStatus,
+            checkedAt: memCache.urlStatusTs ? new Date(memCache.urlStatusTs).toISOString() : null,
+            count: Object.keys(statuses).length,
+            statuses: statuses
+        }, null, 2), { headers: { 'Content-Type': 'application/json; charset=utf-8' } });
+    }
+
     // M3U - 固定映射播放列表（供前端电视使用）
     if (path === '/iptv2026.m3u') {
         const m3uHeaders = {
@@ -1921,6 +2013,14 @@ const FRONTEND_HTML = `
         .fixed-badge { display: inline-block; font-size: 10px; background: #92400e; color: #fef3c7; padding: 2px 8px; border-radius: 8px; margin-left: 6px; vertical-align: middle; }
         .valid-badge { display: inline-block; font-size: 10px; background: #dcfce7; color: #166534; padding: 2px 8px; border-radius: 8px; margin-left: 4px; vertical-align: middle; border: 1px solid #86efac; }
         .invalid-badge { display: inline-block; font-size: 10px; background: #fee2e2; color: #991b1b; padding: 2px 8px; border-radius: 8px; margin-left: 4px; vertical-align: middle; border: 1px solid #fca5a5; font-weight: 600; }
+        /* 连通性状态点 */
+        .conn-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-left: 6px; vertical-align: middle; border: 1px solid rgba(0,0,0,0.1); }
+        .conn-dot.ok { background: #22c55e; box-shadow: 0 0 4px #22c55e; }
+        .conn-dot.fail { background: #ef4444; box-shadow: 0 0 4px #ef4444; }
+        .conn-dot.unknown { background: #d1d5db; }
+        .conn-summary { display: inline-block; font-size: 10px; margin-left: 6px; vertical-align: middle; }
+        .conn-summary .ok-count { color: #166534; font-weight: 600; }
+        .conn-summary .fail-count { color: #dc2626; font-weight: 600; }
         .channel-group { font-size: 12px; color: #6b7280; }
         .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; justify-content: center; align-items: center; z-index: 1000; }
         .modal { background: white; border-radius: 8px; padding: 24px; width: 90%; max-width: 900px; max-height: 90vh; overflow-y: auto; }
@@ -2150,6 +2250,7 @@ const FRONTEND_HTML = `
                     <button class="btn btn-secondary btn-sm" onclick="clearSelection()">清除选择</button>
                     <button class="btn btn-success btn-sm" onclick="createPlaylistFromSelection()">从选中创建播放列表</button>
                     <button class="btn btn-secondary btn-sm" onclick="resetAllPrefs()">重置全部偏好</button>
+                    <button class="btn btn-primary btn-sm" id="checkConnBtn" onclick="checkConnectivity()" title="检测所有频道 URL 连通性（仅本地 Docker 可用）">检测连通性</button>
                 </div>
                 
                 <div id="channelList" class="loading">加载中...</div>
@@ -2313,6 +2414,8 @@ const FRONTEND_HTML = `
         let channelPrefs = {};           // 从 /api/channel-prefs 加载
         let sourceFilterSelected = '';   // 选中的来源名（空=全部）
         let sourceFilterExclude = '';    // 排除的来源名（空=无排除）
+        let urlStatusCache = {};         // 连通性缓存 { url: { ok, latency, status } }
+        let urlStatusCheckedAt = null;   // 缓存时间
 
         async function loadChannels() {
             const res = await fetch('/api/merged-channels');
@@ -2325,14 +2428,79 @@ const FRONTEND_HTML = `
             const prefData = await prefRes.json();
             channelPrefs = prefData.prefs || {};
             document.getElementById('prefCount').textContent = Object.keys(channelPrefs).length;
+            // 加载连通性缓存（如果有的话）
+            try {
+                const connRes = await fetch('/api/connectivity');
+                const connData = await connRes.json();
+                urlStatusCache = connData.statuses || {};
+                urlStatusCheckedAt = connData.checkedAt;
+            } catch(e) { /* 忽略，首次加载可能还没缓存 */ }
             // 渲染
             renderSourceFilterTags();
             renderChannels();
             renderCategories(data.categories);
             renderPagination();
             document.getElementById('totalChannels').textContent = data.total || allChannels.length;
+            // 更新检测按钮状态
+            const btn = document.getElementById('checkConnBtn');
+            if (btn && urlStatusCheckedAt) {
+                btn.textContent = '再检测';
+                btn.title = '上次检测: ' + new Date(urlStatusCheckedAt).toLocaleString();
+            }
         }
         
+        // 渲染频道连通性状态（根据 urlStatusCache）
+        function renderConnStatus(urls) {
+            if (!urlStatusCache || Object.keys(urlStatusCache).length === 0) {
+                // 没检测过：灰点
+                return '<span class="conn-dot unknown" title="未检测连通性"></span>';
+            }
+            let ok = 0, fail = 0, unknown = 0;
+            for (const u of urls || []) {
+                const s = urlStatusCache[u];
+                if (!s) unknown++;
+                else if (s.ok) ok++;
+                else fail++;
+            }
+            if (unknown === urls.length) return '<span class="conn-dot unknown" title="未检测"></span>';
+            // 至少有一个 ok：绿点 + 汇总；全 fail：红点
+            if (ok > 0) {
+                return '<span class="conn-dot ok" title="' + ok + '/' + urls.length + ' 可用"></span>' +
+                    '<span class="conn-summary"><span class="ok-count">' + ok + '</span>/<span>' + urls.length + '</span></span>';
+            }
+            return '<span class="conn-dot fail" title="全部不可用"></span>' +
+                '<span class="conn-summary"><span class="fail-count">' + fail + '</span>/<span>' + urls.length + '</span></span>';
+        }
+
+        // 触发连通性检测
+        async function checkConnectivity() {
+            const btn = document.getElementById('checkConnBtn');
+            if (!btn) return;
+            btn.disabled = true;
+            btn.textContent = '检测中...';
+            try {
+                const res = await fetch('/api/check-connectivity', { method: 'POST' });
+                const data = await res.json();
+                if (!data.success) {
+                    alert('检测失败: ' + data.error);
+                    btn.disabled = false;
+                    btn.textContent = '检测连通性';
+                    return;
+                }
+                urlStatusCache = data.statuses || {};
+                urlStatusCheckedAt = new Date().toISOString();
+                renderChannels();
+                btn.textContent = '再检测';
+                btn.disabled = false;
+                btn.title = '上次检测: ' + new Date(urlStatusCheckedAt).toLocaleString();
+                alert('检测完成！可用 ' + data.ok + '/' + data.total);
+            } catch (err) {
+                alert('检测失败: ' + err.message);
+                btn.disabled = false;
+                btn.textContent = '检测连通性';
+            }
+        }
+
         // 渲染来源筛选标签（从 allChannels.sources 提取）
         function renderSourceFilterTags() {
             const srcSet = new Set();
@@ -2415,6 +2583,7 @@ const FRONTEND_HTML = `
                             \${escapeHtml(ch.name)}
                             \${ch.urlCount > 1 ? '<span class="source-badge">' + ch.urlCount + '源</span>' : ''}
                             \${channelPrefs[ch.key] ? '<span class="badge badge-success" style="margin-left:6px;font-size:10px;">已设偏好</span>' : ''}
+                            \${renderConnStatus(ch.urls)}
                         </div>
                         <div class="channel-group">\${escapeHtml(ch.group)}</div>
                         <div class="channel-sources-row">
