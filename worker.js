@@ -3135,10 +3135,30 @@ const FRONTEND_HTML = `
             const allData = await allRes.json();
             playlistEditor.available = allData.channels.filter(ch => !playlistEditor.selectedUrls.has(ch.url));
             
+            // 顺便加载连通性缓存（用于在弹窗里显示延迟）
+            try {
+                const connRes = await fetch('/api/connectivity');
+                const connData = await connRes.json();
+                urlStatusCache = connData.statuses || {};
+            } catch(e) { /* 忽略 */ }
+            
             renderPlaylistEditor();
             document.getElementById('editPlaylistModal').classList.remove('hidden');
         }
         
+        // 单 URL 连通性 badge（编辑播放列表弹窗用）
+        function getConnBadge(url) {
+            const st = urlStatusCache && urlStatusCache[url];
+            if (!st) return '<span class="conn-dot unknown" title="未检测"></span>';
+            if (st.ok) {
+                const lat = st.latency || 0;
+                const color = lat < 200 ? '#22c55e' : (lat < 500 ? '#f59e0b' : '#ef4444');
+                return '<span class="conn-dot ok" title="可用 ' + lat + 'ms" style="background:' + color + ';box-shadow:0 0 4px ' + color + '"></span>' +
+                    '<span style="color:' + color + ';font-size:11px;margin-left:4px;font-family:monospace">' + lat + 'ms</span>';
+            }
+            return '<span class="conn-dot fail" title="不可用"></span><span style="color:#ef4444;font-size:11px;margin-left:4px">FAIL</span>';
+        }
+
         function renderPlaylistEditor() {
             const availableSearch = document.getElementById('availableSearch').value.toLowerCase();
             const filteredAvailable = playlistEditor.available.filter(ch => 
@@ -3176,7 +3196,7 @@ const FRONTEND_HTML = `
                     <button class="btn-add" onclick="addToPlaylist('\${jsArg(ch.url)}')">+</button>
                     <img class="channel-logo" src="\${escapeHtml(ch.tvgLogo || '')}" onerror="this.style.display='none'">
                     <div class="channel-info">
-                        <div class="channel-name">\${escapeHtml(ch.name)}</div>
+                        <div class="channel-name">\${escapeHtml(ch.name)} \${getConnBadge(ch.url)}</div>
                         <div class="channel-group">\${escapeHtml(ch.group)}</div>
                     </div>
                 </div>
@@ -3187,7 +3207,7 @@ const FRONTEND_HTML = `
                     <button class="btn-remove" onclick="removeFromPlaylist('\${jsArg(ch.url)}')">-</button>
                     <img class="channel-logo" src="\${escapeHtml(ch.tvgLogo || '')}" onerror="this.style.display='none'">
                     <div class="channel-info">
-                        <div class="channel-name">\${escapeHtml(ch.name)}</div>
+                        <div class="channel-name">\${escapeHtml(ch.name)} \${getConnBadge(ch.url)}</div>
                         <div class="channel-group">\${escapeHtml(ch.group)}</div>
                     </div>
                 </div>
